@@ -97,6 +97,19 @@ def _reset_login_limiter():
     _login_limiter._windows.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_guest_limiter():
+    """Reset the guest command/camera rate limiter between tests.
+
+    Same module-level singleton problem as the login limiter above. Tests get
+    away with it today only because each one mints a token with a fresh UUID,
+    so the limiter keys happen not to collide — reuse a token id and the
+    sustained window carries counts across tests.
+    """
+    from app.rate_limiter import rate_limiter
+    rate_limiter._windows.clear()
+
+
 @pytest_asyncio.fixture
 async def client(test_db, mock_ha_client):
     """httpx.AsyncClient using ASGITransport — bypasses lifespan.
