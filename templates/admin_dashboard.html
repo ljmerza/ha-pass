@@ -667,19 +667,32 @@ async function loadEntities() {
 const PICKER_DOMAINS = ['all', 'light', 'switch', 'climate', 'lock', 'media_player', 'cover', 'fan', 'sensor', 'binary_sensor'];
 const PICKER_ICONS = { all: 'apps', ...DOMAIN_ICONS };
 
+// What the entity is called in this picker: the per-token override if one is
+// set, otherwise the HA name. Used for display, search and sort so all three
+// agree - searching for a renamed entity by its new name has to find it.
+function pickerLabel(e, pickerState) {
+  return (pickerState.meta[e.entity_id] || {}).display_name || e.friendly_name || e.entity_id;
+}
+
 function renderPicker(containerId, pickerState) {
   const container = document.getElementById(containerId);
+  const byLabel = (a, b) =>
+    pickerLabel(a, pickerState).localeCompare(pickerLabel(b, pickerState), undefined, { sensitivity: 'base' });
+
   const filtered = allEntities.filter(e => {
     if (pickerState.filter !== 'all' && e.domain !== pickerState.filter) return false;
     if (pickerState.search) {
       const q = pickerState.search.toLowerCase();
-      if (!e.entity_id.toLowerCase().includes(q) && !(e.friendly_name || '').toLowerCase().includes(q)) return false;
+      const hay = [e.entity_id, e.friendly_name || '', pickerLabel(e, pickerState)];
+      if (!hay.some(v => v.toLowerCase().includes(q))) return false;
     }
     return true;
   });
 
-  const selected = filtered.filter(e => pickerState.selected.has(e.entity_id));
-  const available = filtered.filter(e => !pickerState.selected.has(e.entity_id));
+  // Both lists honour the filter. Previously only Available did, so searching
+  // left the Selected list showing everything.
+  const selected = filtered.filter(e => pickerState.selected.has(e.entity_id)).sort(byLabel);
+  const available = filtered.filter(e => !pickerState.selected.has(e.entity_id)).sort(byLabel);
   const allSelected = allEntities.filter(e => pickerState.selected.has(e.entity_id));
 
   container.innerHTML = `
@@ -701,9 +714,9 @@ function renderPicker(containerId, pickerState) {
     </div>
     ${allSelected.length ? `
     <div class="mb-3">
-      <div class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted mb-1.5 px-1">Selected (${allSelected.length})</div>
+      <div class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted mb-1.5 px-1">Selected (${selected.length === allSelected.length ? allSelected.length : `${selected.length} of ${allSelected.length}`})</div>
       <ul class="picker-list max-h-44 overflow-y-auto border border-border-light dark:border-border-dark rounded-xl bg-surface-light dark:bg-surface-dark list-none" role="list">
-        ${allSelected.map(e => {
+        ${selected.map(e => {
           const m = pickerState.meta[e.entity_id] || {};
           const renamed = m.display_name;
           const showsBrightness = m.options && m.options.show_brightness;
@@ -725,6 +738,7 @@ function renderPicker(containerId, pickerState) {
             <span aria-hidden="true" class="material-symbols-outlined text-lg">remove_circle</span>
           </button>
         </li>`; }).join('')}
+        ${!selected.length ? `<li class="px-3 py-4 text-center text-xs text-muted">No selected entities match this filter</li>` : ''}
       </ul>
     </div>` : ''}
     <div class="mb-2">
@@ -757,10 +771,19 @@ function setPickerFilter(containerId, domain) {
 }
 
 function setPickerSearch(containerId, val) {
+  // renderPicker replaces the whole container, so the input element the user is
+  // typing into is destroyed on every keystroke. Capture the caret first and put
+  // it back; pinning it to val.length is what made mid-string edits jump to the
+  // end.
+  const before = document.querySelector(`#${containerId} input[type="text"]`);
+  const start = before ? before.selectionStart : val.length;
+  const end = before ? before.selectionEnd : val.length;
+
   getPickerState(containerId).search = val;
   renderPicker(containerId, getPickerState(containerId));
+
   const input = document.querySelector(`#${containerId} input[type="text"]`);
-  if (input) { input.focus(); input.setSelectionRange(val.length, val.length); }
+  if (input) { input.focus(); input.setSelectionRange(start, end); }
 }
 
 function pickerAdd(containerId, entityId) {

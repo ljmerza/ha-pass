@@ -318,7 +318,12 @@ function renderAll() {
       <span aria-hidden="true" class="material-symbols-outlined text-base ${color.text}">${icon}</span>
       <span class="text-[11px] font-mono font-bold uppercase tracking-widest text-muted">${esc(label)}</span>
     </div>`;
-    for (const eid of groups[domain]) {
+    // Within a domain, order by what the guest actually sees: the per-token
+    // display name if set, then the HA friendly name, then the entity id.
+    const ordered = groups[domain].slice().sort((a, b) =>
+      displayName(a, states[a]).localeCompare(displayName(b, states[b]), undefined, { sensitivity: 'base' })
+    );
+    for (const eid of ordered) {
       html += buildCard(eid, states[eid]);
     }
   }
