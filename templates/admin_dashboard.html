@@ -237,6 +237,11 @@
         <span class="text-sm">Show brightness slider</span>
       </label>
       <p class="text-[11px] text-muted mt-1.5 ml-6.5">Off by default — the guest gets on/off only.</p>
+      <label class="flex items-center gap-2.5 cursor-pointer mt-3">
+        <input id="entity-show-color" type="checkbox" class="w-4 h-4 rounded border-border-light dark:border-border-dark accent-primary">
+        <span class="text-sm">Show colour wheel</span>
+      </label>
+      <p class="text-[11px] text-muted mt-1.5 ml-6.5">Also off by default, and only drawn for lights Home Assistant reports as colour-capable.</p>
     </div>
 
     <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-border-light dark:border-border-dark">
@@ -728,6 +733,7 @@ function renderPicker(containerId, pickerState) {
           const m = pickerState.meta[e.entity_id] || {};
           const renamed = m.display_name;
           const showsBrightness = m.options && m.options.show_brightness;
+          const showsColor = m.options && m.options.show_color;
           return `<li class="flex items-center gap-3 px-3 py-2.5 border-b border-border-light dark:border-border-dark last:border-b-0 hover:bg-soot/[0.03] dark:hover:bg-white/5 cursor-pointer transition-colors" data-action="picker-edit" data-container="${containerId}" data-entity="${esc(e.entity_id)}" role="button" tabindex="0" aria-label="Edit ${esc(renamed || e.friendly_name || e.entity_id)}">
           <div class="w-7 h-7 rounded-full ${DOMAIN_COLORS[e.domain]?.icon || 'bg-gray-500'} flex items-center justify-center flex-shrink-0">
             <span aria-hidden="true" class="material-symbols-outlined text-white text-sm">${PICKER_ICONS[e.domain] || 'devices'}</span>
@@ -737,6 +743,7 @@ function renderPicker(containerId, pickerState) {
               ${esc(renamed || e.friendly_name || e.entity_id)}
               ${renamed ? '<span aria-hidden="true" class="material-symbols-outlined text-accent" style="font-size:14px" title="Renamed">edit</span>' : ''}
               ${showsBrightness ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Brightness slider shown">brightness_high</span>' : ''}
+              ${showsColor ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Colour wheel shown">palette</span>' : ''}
             </div>
             <div class="text-[11px] text-muted font-mono truncate">${esc(e.entity_id)}</div>
           </div>
@@ -899,6 +906,8 @@ function openEntityModal(containerId, entityId) {
   lightOpts.classList.toggle('hidden', !isLight);
   document.getElementById('entity-show-brightness').checked =
     Boolean(meta.options && meta.options.show_brightness);
+  document.getElementById('entity-show-color').checked =
+    Boolean(meta.options && meta.options.show_color);
 
   openModal('entity-modal');
   nameInput.focus();
@@ -917,9 +926,11 @@ function submitEntityMeta() {
   const name = document.getElementById('entity-display-name').value.trim().slice(0, 64);
   const isLight = entityId.split('.')[0] === 'light';
   const showBrightness = isLight && document.getElementById('entity-show-brightness').checked;
+  const showColor = isLight && document.getElementById('entity-show-color').checked;
 
   const options = {};
   if (showBrightness) options.show_brightness = true;
+  if (showColor) options.show_color = true;
 
   if (name || Object.keys(options).length) {
     pickerState.meta[entityId] = {

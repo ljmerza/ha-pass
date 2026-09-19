@@ -249,6 +249,112 @@ async def test_all_forbidden_keys_are_scrubbed(client, sample_token, mock_ha_cli
 
 
 # ---------------------------------------------------------------------------
+# Light colour payloads — validated, not forwarded on trust
+# ---------------------------------------------------------------------------
+
+async def test_valid_rgb_color_reaches_ha(client, sample_token, mock_ha_client):
+    """The colour wheel's payload passes validation and arrives intact."""
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {"rgb_color": [255, 128, 0]},
+        },
+    )
+    assert resp.status_code == 200
+    domain, service, service_data = mock_ha_client["call_service"].call_args[0]
+    assert (domain, service) == ("light", "turn_on")
+    assert service_data == {"rgb_color": [255, 128, 0], "entity_id": "light.living_room"}
+
+
+@pytest.mark.parametrize("rgb", [
+    [255, 128],                 # too short
+    [255, 128, 0, 0],           # too long
+    [256, 0, 0],                # out of range high
+    [-1, 0, 0],                 # out of range low
+    ["255", "0", "0"],          # strings
+    [255.5, 0, 0],              # floats
+    [True, False, True],        # bools are ints in Python — must still be rejected
+    "red",                      # not a sequence
+    {"r": 255},                 # not a sequence
+    None,                       # explicit null
+])
+async def test_malformed_rgb_color_is_rejected(client, sample_token, mock_ha_client, rgb):
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {"rgb_color": rgb},
+        },
+    )
+    assert resp.status_code == 422
+    mock_ha_client["call_service"].assert_not_called()
+
+
+@pytest.mark.parametrize("key,value", [
+    ("hs_color", [400, 200]),
+    ("xy_color", [9, 9]),
+    ("rgbww_color", [255, 0, 0, 0, 0]),
+    ("color_temp_kelvin", 1),
+    ("color_name", "goldenrod"),
+    ("profile", "relax"),
+])
+async def test_other_color_formats_are_rejected(client, sample_token, mock_ha_client, key, value):
+    """Only rgb_color is accepted — no unchecked colour format reaches HA."""
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {key: value},
+        },
+    )
+    assert resp.status_code == 422
+    mock_ha_client["call_service"].assert_not_called()
+
+
+async def test_forbidden_data_keys_still_rejected_alongside_colour(
+    client, sample_token, mock_ha_client
+):
+    """The allowlist guard is unaffected by the colour check running before it."""
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {
+                "rgb_color": [0, 255, 0],
+                "entity_id": "light.MALICIOUS",
+                "area_id": "sneaky",
+                "label_id": "all_lights",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    service_data = mock_ha_client["call_service"].call_args[0][2]
+    assert service_data["entity_id"] == "light.living_room"
+    assert "area_id" not in service_data
+    assert "label_id" not in service_data
+    assert service_data["rgb_color"] == [0, 255, 0]
+
+
+async def test_colour_check_does_not_touch_other_domains(client, sample_token, mock_ha_client):
+    """rgb_color is only meaningful to light.turn_on; nothing else is inspected."""
+    now = int(time.time())
+    token = await db.create_token(
+        label="Switch Token", slug="switch-tok", entity_ids=["switch.lamp"],
+        expires_at=now + 3600, ip_allowlist=None,
+    )
+    resp = await client.post(
+        f"/g/{token['slug']}/command",
+        json={"entity_id": "switch.lamp", "service": "turn_on", "data": {"rgb_color": "nonsense"}},
+    )
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Token validation — real DB lookups in _validate_token
 # ---------------------------------------------------------------------------
 

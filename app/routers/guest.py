@@ -26,6 +26,7 @@ from app.models import (
     CommandRequest,
     FORBIDDEN_DATA_KEYS,
     NEVER_EXPIRES_SECONDS,
+    validate_light_color,
 )
 from app.rate_limiter import rate_limiter
 
@@ -487,6 +488,17 @@ async def guest_command(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Service '{svc_name}' not allowed for {entity_domain}",
         )
+
+    # The colour wheel is the one widget that posts a structured value built
+    # from raw pointer coordinates, so its payload is validated rather than
+    # forwarded on trust.
+    if entity_domain == "light" and svc_name == "turn_on":
+        color_error = validate_light_color(body.data)
+        if color_error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=color_error,
+            )
 
     # Only entity_id and service are ever logged, so secrets a widget has to
     # pass through here — an alarm code, say — stay in transit and nowhere else.

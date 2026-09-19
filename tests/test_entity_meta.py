@@ -1,6 +1,6 @@
 """Per-token entity presentation overrides (display name + display options).
 
-show_brightness is opt-in: absent means the guest gets on/off only.
+show_brightness and show_color are opt-in: absent means the guest gets on/off only.
 
 These are presentation-only: nothing here may widen what a token can reach, and
 the overrides must survive an entity add/remove, which rebuilds the row set.
@@ -100,12 +100,79 @@ async def test_unknown_option_keys_are_dropped(client, admin_session, meta_token
         f"/admin/tokens/{meta_token['id']}/entity-meta",
         json={
             "entity_id": "light.kitchen",
-            "options": {"show_brightness": True, "allow_everything": True},
+            "options": {"show_brightness": True, "show_color": True, "allow_everything": True},
         },
         cookies=admin_session,
     )
     assert r.status_code == 200
-    assert r.json()["options"] == {"show_brightness": True}
+    assert r.json()["options"] == {"show_brightness": True, "show_color": True}
+
+
+@pytest.mark.asyncio
+async def test_show_color_round_trips_through_the_admin_api(
+    client, admin_session, meta_token, mock_ha_client
+):
+    """The colour toggle follows the same path show_brightness does."""
+    r = await client.patch(
+        f"/admin/tokens/{meta_token['id']}/entity-meta",
+        json={
+            "entity_id": "light.kitchen",
+            "options": {"show_brightness": True, "show_color": True},
+        },
+        cookies=admin_session,
+    )
+    assert r.status_code == 200
+    assert r.json()["options"] == {"show_brightness": True, "show_color": True}
+
+    meta = await db.get_token_entity_meta(meta_token["id"])
+    assert meta["light.kitchen"]["options"] == {"show_brightness": True, "show_color": True}
+
+
+@pytest.mark.asyncio
+async def test_show_color_reaches_the_guest_state_payload(
+    client, admin_session, meta_token, mock_ha_client
+):
+    """Only the payload the guest page reads can turn the wheel on."""
+    await client.patch(
+        f"/admin/tokens/{meta_token['id']}/entity-meta",
+        json={"entity_id": "light.kitchen", "options": {"show_color": True}},
+        cookies=admin_session,
+    )
+    body = (await client.get(f"/g/{meta_token['slug']}/state")).json()
+    assert body["entity_meta"]["light.kitchen"]["options"] == {"show_color": True}
+    # The other entity was never opted in, so it stays without the flag.
+    assert "show_color" not in body["entity_meta"]["light.living_room"]["options"]
+
+
+@pytest.mark.asyncio
+async def test_show_color_survives_an_entity_list_edit(meta_token, mock_ha_client):
+    await db.set_entity_meta(
+        meta_token["id"], "light.kitchen", None, {"show_color": True}
+    )
+    await db.update_token_entities(
+        meta_token["id"], ["light.living_room", "light.kitchen", "switch.fan"]
+    )
+    meta = await db.get_token_entity_meta(meta_token["id"])
+    assert meta["light.kitchen"]["options"] == {"show_color": True}
+
+
+@pytest.mark.asyncio
+async def test_show_color_is_presentation_only(client, admin_session, meta_token, mock_ha_client):
+    """The toggle decides what the UI draws, not what the token may call.
+
+    Consistent with show_brightness: putting a light on a token is what grants
+    light.turn_on, so a colour command is accepted whether or not the wheel is
+    offered. Nothing in the command path reads ENTITY_OPTION_KEYS.
+    """
+    resp = await client.post(
+        f"/g/{meta_token['slug']}/command",
+        json={
+            "entity_id": "light.kitchen",   # show_color never enabled for this one
+            "service": "light.turn_on",
+            "data": {"rgb_color": [10, 20, 30]},
+        },
+    )
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio

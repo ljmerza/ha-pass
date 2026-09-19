@@ -61,9 +61,43 @@ DISPLAY_NAME_MAX = 64
 # admin API can't accumulate keys nothing renders. Presentation only — nothing in
 # the command path reads these.
 #
-# show_brightness is opt-IN: with no option set a light gets on/off only, and a
-# token has to enable the slider per entity.
-ENTITY_OPTION_KEYS: set[str] = {"show_brightness"}
+# show_brightness and show_color are opt-IN: with no option set a light gets
+# on/off only, and a token has to enable the slider or the colour wheel per
+# entity. Neither gates the command path: putting a light on a token is what
+# grants light.turn_on, so these only decide what the guest UI draws.
+ENTITY_OPTION_KEYS: set[str] = {"show_brightness", "show_color"}
+
+# Colour keys HA's light.turn_on understands. Only rgb_color is accepted from a
+# guest: it is the one the colour wheel sends, and every other format would need
+# its own range check before it could be forwarded safely.
+LIGHT_COLOR_KEYS: set[str] = {
+    "rgb_color", "rgbw_color", "rgbww_color", "hs_color", "xy_color",
+    "color_temp", "color_temp_kelvin", "color_name", "profile", "white",
+}
+GUEST_COLOR_KEY = "rgb_color"
+
+
+def validate_light_color(data: dict[str, Any]) -> str | None:
+    """Check a guest light.turn_on payload's colour. Returns an error, or None.
+
+    The wheel posts whatever the guest's pointer produced, so the value is
+    shape- and range-checked here rather than handed to HA as-is.
+    """
+    for key in data:
+        if key in LIGHT_COLOR_KEYS and key != GUEST_COLOR_KEY:
+            return f"Colour format '{key}' is not accepted"
+    if GUEST_COLOR_KEY not in data:
+        return None
+    # Membership, not .get() — an explicit null is a malformed colour, not an
+    # absent one, and must not be forwarded as a null key.
+    rgb = data[GUEST_COLOR_KEY]
+    if not isinstance(rgb, (list, tuple)) or len(rgb) != 3:
+        return "rgb_color must be three values"
+    for channel in rgb:
+        # bool is an int subclass, so True would otherwise pass the range check.
+        if isinstance(channel, bool) or not isinstance(channel, int) or not 0 <= channel <= 255:
+            return "rgb_color values must be integers from 0 to 255"
+    return None
 
 
 class TokenCreateRequest(BaseModel):

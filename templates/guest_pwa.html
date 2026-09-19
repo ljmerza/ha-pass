@@ -53,6 +53,25 @@
     border-radius: 50%; background: #fff; border: 1px solid var(--hex-muted-ui);
     box-shadow: 0 1px 4px rgba(0,0,0,.15); cursor: pointer;
   }
+  /* Hue around the rim, saturation towards the middle. Value is deliberately
+     absent — brightness stays the slider's job. */
+  .color-wheel {
+    background:
+      radial-gradient(circle at center, #fff 0%, rgba(255,255,255,0) 100%),
+      conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+    box-shadow: 0 1px 4px rgba(0,0,0,.15);
+    cursor: pointer; touch-action: none;
+  }
+  .color-wheel-thumb {
+    width: 22px; height: 22px; border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,.45), 0 0 0 1px rgba(0,0,0,.15);
+    transform: translate(-50%, -50%); pointer-events: none;
+  }
+  .color-swatch {
+    width: 26px; height: 26px; border-radius: 50%; padding: 0; flex-shrink: 0;
+    border: 1px solid var(--hex-muted-ui); cursor: pointer;
+  }
+  .dark .color-swatch { border-color: var(--hex-muted-dark); }
   @keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .sheet-animate { animation: sheetUp .25s ease-out; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -168,8 +187,19 @@
       <input type="password" id="sheet-code" autocomplete="off" inputmode="numeric" placeholder="Code" aria-label="Alarm code"
         class="w-full py-3 px-4 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-center text-lg font-mono tracking-[0.3em] outline-none focus:border-primary">
     </div>
+    <!-- Shown only for colour-capable lights the token opted in. The wheel
+         applies live, so this sheet has nothing to confirm: Confirm is hidden
+         and Cancel becomes Done while it is up. -->
+    <div class="hidden mb-5" id="sheet-wheel-wrap">
+      <div class="color-wheel relative rounded-full mx-auto" id="sheet-wheel"
+        style="width:220px;height:220px;"
+        role="slider" aria-label="Colour hue" aria-valuemin="0" aria-valuemax="359" aria-valuenow="0"
+        tabindex="0" data-wheel-action="color">
+        <div class="color-wheel-thumb absolute rounded-full" id="sheet-wheel-thumb"></div>
+      </div>
+    </div>
     <div class="flex gap-3">
-      <button data-action="close-sheet" class="flex-1 py-3.5 rounded-xl bg-soot/5 dark:bg-white/5 text-sm font-display font-semibold">Cancel</button>
+      <button data-action="close-sheet" id="sheet-cancel" class="flex-1 py-3.5 rounded-xl bg-soot/5 dark:bg-white/5 text-sm font-display font-semibold">Cancel</button>
       <button id="sheet-ok" class="flex-1 py-3.5 rounded-xl bg-primary text-white text-sm font-display font-semibold">Confirm</button>
     </div>
   </div>
@@ -529,12 +559,76 @@ document.addEventListener('visibilitychange', () => {
 
 window.addEventListener('pagehide', detachCameraStreams);
 
+// ── Light colour ─────────────────────────────────────────────────────
+// HA reports what a light can do in supported_color_modes. Only these modes
+// take a colour; color_temp and brightness lights get no wheel however the
+// token is configured.
+const COLOR_CAPABLE_MODES = ['rgb', 'rgbw', 'rgbww', 'hs', 'xy'];
+const WHEEL_SIZE = 220;  // px — must match the inline size on #sheet-wheel
+
+function lightSupportsColor(state) {
+  const modes = state?.attributes?.supported_color_modes || [];
+  return modes.some(m => COLOR_CAPABLE_MODES.includes(m));
+}
+
+// The wheel is shown only when the token opted this entity in AND the bulb can
+// actually do colour — both, never either alone.
+function showsColorWheel(eid, state) {
+  return entityOption(eid, 'show_color') && lightSupportsColor(state);
+}
+
+// Value is pinned to 1: the wheel picks hue and saturation, brightness is the
+// slider's job, and folding it in here would fight that control.
+function hsvToRgb(h, s) {
+  const x = 1 - Math.abs((h / 60) % 2 - 1);
+  const [r, g, b] = h < 60 ? [1, x, 0] : h < 120 ? [x, 1, 0] : h < 180 ? [0, 1, x]
+    : h < 240 ? [0, x, 1] : h < 300 ? [x, 0, 1] : [1, 0, x];
+  return [r, g, b].map(c => Math.round((c * s + (1 - s)) * 255));
+}
+
+function rgbToHs(rgb) {
+  const [r, g, b] = (rgb || [255, 255, 255]).map(c => c / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = 60 * (((g - b) / d) % 6);
+    else if (max === g) h = 60 * ((b - r) / d + 2);
+    else h = 60 * ((r - g) / d + 4);
+  }
+  return [h < 0 ? h + 360 : h, max === 0 ? 0 : d / max];
+}
+
+// Hue 0 (red) points up and runs clockwise, matching the conic-gradient.
+function hsToOffset(h, s) {
+  const rad = h * Math.PI / 180;
+  const radius = (WHEEL_SIZE / 2) * Math.min(s, 1);
+  return [radius * Math.sin(rad), -radius * Math.cos(rad)];
+}
+
+function swatchColor(state) {
+  const [r, g, b] = state?.attributes?.rgb_color || [255, 255, 255];
+  return `rgb(${Number(r) || 0}, ${Number(g) || 0}, ${Number(b) || 0})`;
+}
+
 function buildLightControls(eid, state) {
   if (state.state !== 'on') return '';
-  // Opt-in: no slider unless this token explicitly enabled it for this entity.
-  if (!entityOption(eid, 'show_brightness')) return '';
+  // Both are opt-in: with neither enabled for this entity the light is on/off only.
+  const showBrightness = entityOption(eid, 'show_brightness');
+  const showColor = showsColorWheel(eid, state);
+  if (!showBrightness && !showColor) return '';
+
   const brightness = Number(state.attributes?.brightness) || 255;
   const pct = Math.round((brightness / 255) * 100);
+  const swatch = showColor ? `<button type="button" class="color-swatch" id="swatch-${cssId(eid)}"
+      style="background: ${swatchColor(state)}" aria-label="Choose colour"
+      data-action="open-color-sheet" data-eid="${esc(eid)}"></button>` : '';
+
+  if (!showBrightness) {
+    return `<div class="mt-3 flex items-center gap-3">
+      ${swatch}
+      <span class="text-xs text-muted">Colour</span>
+    </div>`;
+  }
   return `<div data-slider-section class="mt-3 flex items-center gap-3">
     <span aria-hidden="true" class="material-symbols-outlined text-base text-muted">brightness_low</span>
     <input type="range" min="1" max="100" value="${pct}" id="bri-${cssId(eid)}"
@@ -542,6 +636,7 @@ function buildLightControls(eid, state) {
       data-range-action="brightness" data-eid="${esc(eid)}" data-display-id="bri-val-${cssId(eid)}">
     <span aria-hidden="true" class="material-symbols-outlined text-base text-muted">brightness_high</span>
     <span class="text-xs text-muted tabular-nums min-w-[36px] text-right font-mono" id="bri-val-${cssId(eid)}">${pct}%</span>
+    ${swatch}
   </div>`;
 }
 
@@ -933,10 +1028,15 @@ function updateLightCard(eid, state, card) {
   }
   card.classList.toggle('opacity-60', !on);
 
-  const sliderSection = card.querySelector('[data-slider-section]');
-  const hasSlider = sliderSection && sliderSection.querySelector('input[type=range]');
+  // Which controls the card carries, against which it should carry now. A
+  // colour tick echoes back several times a second, so this compares both
+  // controls rather than rebuilding whenever the slider happens to be absent.
+  const hasSlider = Boolean(card.querySelector('input[data-range-action="brightness"]'));
+  const hasSwatch = Boolean(card.querySelector(`#swatch-${cssId(eid)}`));
+  const wantsSlider = on && entityOption(eid, 'show_brightness');
+  const wantsSwatch = on && showsColorWheel(eid, state);
 
-  if ((on && !hasSlider) || (!on && hasSlider)) {
+  if (hasSlider !== wantsSlider || hasSwatch !== wantsSwatch) {
     const parent = card.parentElement;
     const newCard = document.createElement('div');
     newCard.innerHTML = buildCard(eid, state);
@@ -948,11 +1048,21 @@ function updateLightCard(eid, state, card) {
       void freshCard.offsetWidth;
       freshCard.classList.add('pulse');
     }
-  } else if (on && hasSlider) {
+    return;
+  }
+
+  if (hasSlider) {
     const brightness = state.attributes?.brightness ?? 255;
     const pct = Math.round((brightness / 255) * 100);
     const slider = document.getElementById(`bri-${cssId(eid)}`);
     if (slider) { slider.value = pct; document.getElementById(`bri-val-${cssId(eid)}`).textContent = pct + '%'; }
+  }
+  if (hasSwatch) {
+    const swatch = document.getElementById(`swatch-${cssId(eid)}`);
+    if (swatch) swatch.style.background = swatchColor(state);
+    // HA's echo repositions the thumb only when the guest is not dragging it —
+    // the drag owns the thumb until the pointer comes up.
+    if (wheelSheetEid === eid && !activeWheel) positionWheelThumb(state.attributes?.rgb_color);
   }
 }
 
@@ -1203,6 +1313,49 @@ function confirmAlarm(eid, service, title, body) {
   openSheet();
 }
 
+// ── Colour Wheel (shared bottom sheet) ───────────────────────────────
+// The wheel rides in the same sheet as the lock and alarm confirmations, so
+// open/close, the backdrop and the focus trap are the ones already written.
+// It applies live and commits nothing, so it drops Confirm and Cancel reads
+// "Done" while it is up.
+let wheelSheetEid = null;
+// The hue/saturation the thumb is drawn at. Kept here rather than read back
+// from states[] so a drag or a key repeat moves the thumb at pointer speed
+// instead of at the speed HA echoes the change over SSE.
+let wheelHs = [0, 0];
+let wheelSend = { lastSent: 0, lastRgb: null };
+
+function positionWheelThumb(rgb) {
+  wheelHs = rgbToHs(rgb);
+  renderWheelThumb();
+}
+
+function renderWheelThumb() {
+  const thumb = document.getElementById('sheet-wheel-thumb');
+  if (!thumb) return;
+  const [dx, dy] = hsToOffset(wheelHs[0], wheelHs[1]);
+  thumb.style.left = `calc(50% + ${dx}px)`;
+  thumb.style.top = `calc(50% + ${dy}px)`;
+  const wheel = document.getElementById('sheet-wheel');
+  if (wheel) wheel.setAttribute('aria-valuenow', String(Math.round(wheelHs[0])));
+}
+
+function showSheetWheel(eid) {
+  wheelSheetEid = eid;
+  wheelSend = { lastSent: -WHEEL_THROTTLE_MS, lastRgb: null };
+  document.getElementById('sheet-wheel-wrap').classList.toggle('hidden', !eid);
+  document.getElementById('sheet-ok').classList.toggle('hidden', Boolean(eid));
+  document.getElementById('sheet-cancel').textContent = eid ? 'Done' : 'Cancel';
+  if (eid) positionWheelThumb(states[eid]?.attributes?.rgb_color);
+}
+
+function openColorSheet(eid) {
+  document.getElementById('sheet-title').textContent = displayName(eid, states[eid]);
+  document.getElementById('sheet-body').textContent = 'Drag the wheel — the light follows as you go.';
+  showSheetWheel(eid);
+  openSheet();
+}
+
 function confirmLockOpen(eid) {
   document.getElementById('sheet-title').textContent = 'Open latch?';
   document.getElementById('sheet-body').textContent = 'This will open the latch.';
@@ -1226,6 +1379,7 @@ function closeSheet() {
   backdrop.classList.remove('flex');
   backdrop.classList.add('hidden');
   showSheetCode(null);  // never leave an alarm code sitting in the DOM
+  showSheetWheel(null);
   sheetCallback = null;
   releaseFocus();
 }
@@ -1281,6 +1435,9 @@ document.addEventListener('click', e => {
     case 'confirm-alarm':
       confirmAlarm(eid, el.dataset.service, el.dataset.title, el.dataset.body);
       break;
+    case 'open-color-sheet':
+      openColorSheet(eid);
+      break;
     case 'close-sheet':
       closeSheet();
       break;
@@ -1329,6 +1486,84 @@ document.addEventListener('change', e => {
   else if (action === 'volume') sendVolume(eid, el.value);
   else if (action === 'fan-speed') sendCmd(eid, 'fan', 'set_percentage', { percentage: parseInt(el.value) });
   else if (action === 'input-number') sendCmd(eid, 'input_number', 'set_value', { value: parseFloat(el.value) });
+});
+
+// ── Colour Wheel Drag ────────────────────────────────────────────────
+// The thumb is moved from the pointer position on every move event and the
+// command is throttled independently, so the wheel never waits on HA's echo to
+// catch up. 250ms is four commands a second: the guest command proxy allows
+// COMMAND_BURST_RPM=300/min, which leaves room for taps alongside a continuous
+// drag, and most bulbs cannot fade faster than that anyway. Release always
+// sends, so the colour that sticks is the one under the finger and not
+// whichever throttled tick landed last.
+const WHEEL_THROTTLE_MS = 250;
+let activeWheel = null;  // { rect } for as long as a pointer is down on the wheel
+
+function applyWheelPointer(e, commit) {
+  const rect = activeWheel.rect;
+  const radius = rect.width / 2;
+  const dx = e.clientX - (rect.left + radius);
+  const dy = e.clientY - (rect.top + radius);
+  let h = Math.atan2(dx, -dy) * 180 / Math.PI;
+  if (h < 0) h += 360;
+  wheelHs = [h, Math.min(Math.hypot(dx, dy) / radius, 1)];
+  renderWheelThumb();
+  sendWheelColor(commit);
+}
+
+// Throttled while the colour is still moving; commit always sends. Shared by
+// the drag and the arrow keys, and reset whenever the sheet opens or closes.
+function sendWheelColor(commit) {
+  const rgb = hsvToRgb(wheelHs[0], wheelHs[1]);
+  const now = performance.now();
+  if (!commit && now - wheelSend.lastSent < WHEEL_THROTTLE_MS) return;
+  // A tap sends on press and again on release; skip the second if it is the
+  // same colour rather than spending a command on it.
+  if (String(rgb) === String(wheelSend.lastRgb)) return;
+  wheelSend = { lastSent: now, lastRgb: rgb };
+  sendCmd(wheelSheetEid, 'light', 'turn_on', { rgb_color: rgb });
+}
+
+document.addEventListener('pointerdown', e => {
+  const wheel = e.target.closest('[data-wheel-action="color"]');
+  if (!wheel || !wheelSheetEid) return;
+  e.preventDefault();
+  // The rect is measured once: the sheet does not move during a drag, and
+  // re-reading layout on every pointermove is what makes a wheel feel laggy.
+  activeWheel = { rect: wheel.getBoundingClientRect() };
+  wheel.setPointerCapture?.(e.pointerId);
+  applyWheelPointer(e, false);
+});
+
+document.addEventListener('pointermove', e => {
+  if (activeWheel) applyWheelPointer(e, false);
+});
+
+document.addEventListener('pointerup', e => {
+  if (!activeWheel) return;
+  applyWheelPointer(e, true);
+  activeWheel = null;
+});
+
+document.addEventListener('pointercancel', () => { activeWheel = null; });
+
+// The wheel is focusable, so it also steps by keyboard: hue sideways,
+// saturation up and down.
+const WHEEL_HUE_STEP = 10;
+const WHEEL_SAT_STEP = 0.1;
+const WHEEL_KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+
+document.addEventListener('keydown', e => {
+  const step = WHEEL_KEYS[e.key];
+  if (!step || !wheelSheetEid || !e.target.closest('[data-wheel-action="color"]')) return;
+  e.preventDefault();
+  wheelHs = [
+    (wheelHs[0] + step[0] * WHEEL_HUE_STEP + 360) % 360,
+    Math.min(1, Math.max(0, wheelHs[1] + step[1] * WHEEL_SAT_STEP)),
+  ];
+  renderWheelThumb();
+  // A held arrow repeats at the OS key rate, so it goes through the same throttle.
+  sendWheelColor(false);
 });
 
 // ── Install Banner ───────────────────────────────────────────────────
