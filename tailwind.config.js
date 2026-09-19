@@ -1,7 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   darkMode: 'class',
-  content: ['./templates/**/*.html'],
+  content: ['./templates/**/*.html', './static/**/*.js'],
   safelist: [
     'bg-amber-500', 'bg-amber-500/20',
     'bg-teal-600', 'bg-teal-600/20',
