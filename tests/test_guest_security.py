@@ -369,16 +369,16 @@ async def test_guest_pwa_ip_allowlist_blocks_non_matching(client, mock_ha_client
 # ---------------------------------------------------------------------------
 
 async def test_rate_limit_returns_429(client, mock_ha_client, test_db):
-    """Exhaust the global 30 RPM limit and verify 429 is returned."""
-    from app.routers.guest import COMMAND_RPM
+    """Exhaust the global burst RPM limit and verify 429 is returned."""
+    from app.routers.guest import COMMAND_BURST_RPM
 
     now = int(time.time())
     await db.create_token(
         label="Rate", slug="rate-test", entity_ids=["light.a"],
         expires_at=now + 3600, ip_allowlist=None,
     )
-    # Exhaust the global RPM limit
-    for i in range(COMMAND_RPM):
+    # Exhaust the global burst RPM limit
+    for i in range(COMMAND_BURST_RPM):
         resp = await client.post(
             "/g/rate-test/command",
             json={"entity_id": "light.a", "service": "turn_on"},
@@ -391,7 +391,7 @@ async def test_rate_limit_returns_429(client, mock_ha_client, test_db):
         json={"entity_id": "light.a", "service": "turn_on"},
     )
     assert resp.status_code == 429
-    assert mock_ha_client["call_service"].call_count == COMMAND_RPM
+    assert mock_ha_client["call_service"].call_count == COMMAND_BURST_RPM
 
 
 # ---------------------------------------------------------------------------

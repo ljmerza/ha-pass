@@ -35,9 +35,20 @@ logger = logging.getLogger(__name__)
 # L-31: Named constant for SSE keepalive interval
 SSE_KEEPALIVE_SECONDS = 25
 
-# Global rate limit for guest command proxy (requests per minute per token).
+# Global rate limits for the guest command proxy, as (window_seconds, max_requests)
+# pairs per token — a request has to pass every one of them.
 # Hardcoded — no comparable self-hosted app exposes per-user rate limits.
-COMMAND_RPM = 30
+#
+# A single per-minute cap cannot serve both cases here. The light colour wheel
+# streams throttled updates for as long as the guest drags it, so the short
+# window has to be generous: at ~4 updates/second, 300/min covers a solid minute
+# of dragging plus the taps interleaved with it. A cap that loose is the wrong
+# long-run budget though, so the hour window carries the real ceiling — 3000/hour
+# is ten minutes at the burst rate, and clamps anything scripted to under
+# 1 req/s averaged out.
+COMMAND_BURST_RPM = 300
+COMMAND_SUSTAINED_RPH = 3000
+COMMAND_LIMITS = ((60.0, COMMAND_BURST_RPM), (3600.0, COMMAND_SUSTAINED_RPH))
 
 # Camera stills are cheap and the UI refreshes thumbnails on a timer, so they get
 # their own, looser budget under a separate limiter key — a guest watching a camera
@@ -443,7 +454,7 @@ async def guest_command(
     row = await _validate_token(slug, request)
     token_id = row["id"]
 
-    allowed = await rate_limiter.check(token_id, COMMAND_RPM)
+    allowed = await rate_limiter.check_multi(token_id, COMMAND_LIMITS)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
 
