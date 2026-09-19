@@ -17,12 +17,31 @@ ALLOWED_SERVICES: dict[str, set[str]] = {
                       "media_play_pause", "turn_on", "turn_off"},
     "cover":         {"open_cover", "close_cover", "stop_cover"},
     "fan":           {"turn_on", "turn_off", "toggle", "set_percentage"},
+    "group":         {"turn_on", "turn_off", "toggle"},
+    "button":        {"press"},
+    "time":          {"set_value"},
+    "datetime":      {"set_value"},
+    # alarm_trigger is excluded for the same reason as script/scene: it lets a
+    # guest link set off the siren remotely, which no arm/disarm widget needs.
+    "alarm_control_panel": {"alarm_arm_home", "alarm_arm_away",
+                            "alarm_arm_night", "alarm_disarm"},
+    # Helper domains (Settings -> Devices & Services -> Helpers). Each lists
+    # exactly the services its guest widget calls, nothing more.
+    "input_number":   {"set_value"},
+    "input_text":     {"set_value"},
+    "input_select":   {"select_option"},
+    "input_datetime": {"set_datetime"},
+    "input_button":   {"press"},
+    "counter":        {"increment", "decrement", "reset"},
+    "timer":          {"start", "pause", "cancel"},
 }
 
 # camera is read-only on purpose: it is deliberately absent from ALLOWED_SERVICES,
 # so every camera.* service call is rejected by the domain check in the command
 # handler. Guests get pixels, never control.
-READ_ONLY_DOMAINS: set[str] = {"sensor", "binary_sensor", "camera"}
+# schedule is read-only for a different reason: its only services rewrite the
+# weekly schedule wholesale, which is not a safe one-tap guest action.
+READ_ONLY_DOMAINS: set[str] = {"sensor", "binary_sensor", "camera", "schedule"}
 SUPPORTED_DOMAINS: set[str] = set(ALLOWED_SERVICES) | READ_ONLY_DOMAINS
 
 # Keys that could bypass the entity allowlist if forwarded to HA

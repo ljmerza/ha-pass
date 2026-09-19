@@ -666,9 +666,13 @@ async function loadEntities() {
 // ── Entity Picker Component ───────────────────────────────────────────
 // Derived from DOMAIN_ORDER so a domain added in domains.js gets a chip
 // automatically - camera was missing because this list was maintained by hand.
-// input_boolean is excluded on purpose: it shares the "Switches" label with
-// switch, so including it renders two identical chips.
-const PICKER_DOMAINS = ['all', ...DOMAIN_ORDER.filter(d => d !== 'input_boolean')];
+// One chip per label, not per domain: input_boolean shares "Switches" with
+// switch, input_button shares "Buttons" with button and input_datetime shares
+// "Date & Time" with datetime, so only the first domain of each label gets a
+// chip and pickerGroup() makes that chip match all of them.
+const pickerGroup = d => DOMAIN_LABELS[d] || d;
+const PICKER_DOMAINS = ['all', ...DOMAIN_ORDER.filter(
+  (d, i) => DOMAIN_ORDER.findIndex(o => pickerGroup(o) === pickerGroup(d)) === i)];
 const PICKER_ICONS = { all: 'apps', ...DOMAIN_ICONS };
 
 // What the entity is called in this picker: the per-token override if one is
@@ -684,7 +688,7 @@ function renderPicker(containerId, pickerState) {
     pickerLabel(a, pickerState).localeCompare(pickerLabel(b, pickerState), undefined, { sensitivity: 'base' });
 
   const filtered = allEntities.filter(e => {
-    if (pickerState.filter !== 'all' && e.domain !== pickerState.filter) return false;
+    if (pickerState.filter !== 'all' && pickerGroup(e.domain) !== pickerGroup(pickerState.filter)) return false;
     if (pickerState.search) {
       const q = pickerState.search.toLowerCase();
       const hay = [e.entity_id, e.friendly_name || '', pickerLabel(e, pickerState)];

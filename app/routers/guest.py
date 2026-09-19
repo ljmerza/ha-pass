@@ -477,6 +477,8 @@ async def guest_command(
             detail=f"Service '{svc_name}' not allowed for {entity_domain}",
         )
 
+    # Only entity_id and service are ever logged, so secrets a widget has to
+    # pass through here — an alarm code, say — stay in transit and nowhere else.
     clean_data = {k: v for k, v in body.data.items() if k not in FORBIDDEN_DATA_KEYS}
     service_data = {**clean_data, "entity_id": body.entity_id}
 

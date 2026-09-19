@@ -161,6 +161,13 @@
   <div class="sheet-animate bg-surface-light dark:bg-surface-dark rounded-t-2xl p-6 w-full max-w-lg text-center" role="dialog" aria-modal="true" aria-labelledby="sheet-title" style="padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));">
     <h3 class="text-lg font-serif mb-1.5" id="sheet-title">Confirm</h3>
     <p class="text-sm text-muted mb-5" id="sheet-body"></p>
+    <!-- Shown only for alarm panels that report a code_format. The code lives in
+         this field and the command body and nowhere else — it is cleared when the
+         sheet closes and never written to a log. -->
+    <div class="hidden mb-5" id="sheet-code-wrap">
+      <input type="password" id="sheet-code" autocomplete="off" inputmode="numeric" placeholder="Code" aria-label="Alarm code"
+        class="w-full py-3 px-4 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-center text-lg font-mono tracking-[0.3em] outline-none focus:border-primary">
+    </div>
     <div class="flex gap-3">
       <button data-action="close-sheet" class="flex-1 py-3.5 rounded-xl bg-soot/5 dark:bg-white/5 text-sm font-display font-semibold">Cancel</button>
       <button id="sheet-ok" class="flex-1 py-3.5 rounded-xl bg-primary text-white text-sm font-display font-semibold">Confirm</button>
@@ -344,14 +351,22 @@ function buildCard(eid, state) {
   let controls = '';
   if (domain === 'camera') controls = buildCameraControls(eid, state);
   else if (domain === 'light') controls = buildLightControls(eid, state);
-  else if (domain === 'switch' || domain === 'input_boolean') controls = '';
+  else if (domain === 'switch' || domain === 'input_boolean' || domain === 'group') controls = '';
   else if (domain === 'climate') controls = buildClimateControls(eid, state);
   else if (domain === 'lock') controls = buildLockControls(eid, state);
   else if (domain === 'media_player') controls = buildMediaControls(eid, state);
   else if (domain === 'cover') controls = buildCoverControls(eid, state);
   else if (domain === 'fan') controls = buildFanControls(eid, state);
+  else if (domain === 'alarm_control_panel') controls = buildAlarmControls(eid, state);
+  else if (domain === 'button' || domain === 'input_button') controls = buildPressControls(eid, domain);
+  else if (domain === 'counter') controls = buildCounterControls(eid, state);
+  else if (domain === 'timer') controls = buildTimerControls(eid, state);
+  else if (domain === 'input_number') controls = buildNumberControls(eid, state);
+  else if (domain === 'input_text') controls = buildTextControls(eid, state);
+  else if (domain === 'input_select') controls = buildSelectControls(eid, state);
+  else if (DATETIME_DOMAINS.includes(domain)) controls = buildPickerControls(eid, state);
 
-  const hasToggle = ['light', 'switch', 'input_boolean', 'fan'].includes(domain);
+  const hasToggle = ['light', 'switch', 'input_boolean', 'group', 'fan'].includes(domain);
   const toggleHtml = hasToggle ? `<div class="toggle-track ${stateStr === 'on' ? 'on' : ''}"
     role="switch" aria-checked="${stateStr === 'on'}" tabindex="0"
     aria-label="Toggle ${esc(name)}"
@@ -403,6 +418,39 @@ function formatState(domain, stateStr, state) {
   }
   if (domain === 'lock') return stateStr === 'locked' ? 'Locked' : 'Unlocked';
   if (domain === 'cover') return esc(stateStr.charAt(0).toUpperCase() + stateStr.slice(1));
+  if (domain === 'alarm_control_panel') return esc(ALARM_STATE_LABELS[stateStr] || stateStr);
+  // A button's state is the timestamp of the last press, or unknown if it has
+  // never been pressed.
+  if (domain === 'button' || domain === 'input_button') {
+    const pressed = new Date(stateStr);
+    return isNaN(pressed) ? 'Ready' : `Pressed ${esc(pressed.toLocaleTimeString(undefined, { timeStyle: 'short' }))}`;
+  }
+  if (domain === 'counter') return esc(stateStr);
+  if (domain === 'timer') {
+    const labels = { idle: 'Idle', active: 'Running', paused: 'Paused' };
+    return esc(labels[stateStr] || stateStr);
+  }
+  if (domain === 'input_number') {
+    const unit = state.attributes?.unit_of_measurement;
+    return unit ? `${esc(stateStr)} ${esc(unit)}` : esc(stateStr);
+  }
+  if (domain === 'input_text') {
+    if (!stateStr || stateStr === 'unknown') return 'Empty';
+    return esc(stateStr.length > 32 ? stateStr.slice(0, 32) + '\u2026' : stateStr);
+  }
+  if (domain === 'input_select') return esc(stateStr);
+  if (DATETIME_DOMAINS.includes(domain)) {
+    const mode = pickerMode(domain, state);
+    const value = pickerValue(domain, state, mode);
+    if (!value) return 'Not set';
+    if (mode === 'time') return esc(value.slice(0, 5));
+    return esc(value.replace('T', ' '));
+  }
+  if (domain === 'schedule') {
+    if (stateStr === 'on') return 'Active';
+    if (stateStr === 'off') return 'Inactive';
+    return esc(stateStr);
+  }
   if (domain === 'fan') {
     const pct = state.attributes?.percentage;
     if (stateStr === 'on' && pct != null) return `On · ${pct}%`;
@@ -426,8 +474,17 @@ function formatState(domain, stateStr, state) {
   return esc(stateStr === 'on' ? 'On' : stateStr === 'off' ? 'Off' : stateStr);
 }
 
+// Domains whose state is a reading or a stored value rather than an on/off
+// signal — "off" means nothing to them, so only a missing entity dims the card.
+const VALUE_STATE_DOMAINS = ['sensor', 'binary_sensor', 'camera', 'schedule', 'alarm_control_panel',
+  'counter', 'timer', 'input_number', 'input_text', 'input_select',
+  'time', 'datetime', 'input_datetime'];
+
 function isDimmedState(domain, stateStr) {
-  if (domain === 'sensor' || domain === 'binary_sensor' || domain === 'camera') {
+  // A button that has never been pressed reports 'unknown'. That is its resting
+  // state, not an unavailable entity.
+  if (domain === 'button' || domain === 'input_button') return stateStr === 'unavailable';
+  if (VALUE_STATE_DOMAINS.includes(domain)) {
     return stateStr === 'unavailable' || stateStr === 'unknown';
   }
   return stateStr === 'off' || stateStr === 'unavailable' || stateStr === 'unknown';
@@ -618,7 +675,224 @@ function buildFanControls(eid, state) {
   </div>`;
 }
 
+// ── Alarm ────────────────────────────────────────────────────────────
+// Bits of HA's AlarmControlPanelEntityFeature. Only the modes a panel actually
+// advertises get a button. alarm_trigger has a bit too (8) and is deliberately
+// not offered — see ALLOWED_SERVICES.
+const ALARM_MODES = [
+  { feature: 1, armed: 'armed_home',  service: 'alarm_arm_home',  label: 'Home',  icon: 'home' },
+  { feature: 2, armed: 'armed_away',  service: 'alarm_arm_away',  label: 'Away',  icon: 'directions_walk' },
+  { feature: 4, armed: 'armed_night', service: 'alarm_arm_night', label: 'Night', icon: 'bedtime' },
+];
+const ALARM_STATE_LABELS = {
+  disarmed: 'Disarmed', armed_home: 'Armed Home', armed_away: 'Armed Away',
+  armed_night: 'Armed Night', arming: 'Arming', pending: 'Pending', triggered: 'Triggered',
+};
+
+function buildAlarmControls(eid, state) {
+  const features = Number(state.attributes?.supported_features) || 0;
+  const modes = ALARM_MODES.filter(m => (features & m.feature) !== 0);
+
+  const armButtons = modes.map(m => `<button data-action="confirm-alarm" data-eid="${esc(eid)}"
+    data-service="${m.service}" data-title="Arm ${m.label}?" data-body="This will arm the alarm in ${m.label} mode."
+    class="flex-1 flex flex-col items-center justify-center gap-1 py-3 rounded-xl border-2 font-display font-semibold text-xs transition-colors active:scale-[0.98] ${
+      state.state === m.armed
+        ? 'border-rose-600/40 text-rose-600 bg-rose-600/10'
+        : 'border-border-light dark:border-border-dark text-muted'}">
+    <span aria-hidden="true" class="material-symbols-outlined text-lg">${m.icon}</span>
+    ${m.label}
+  </button>`).join('');
+
+  const disarm = state.state === 'disarmed' ? '' : `<button data-action="confirm-alarm" data-eid="${esc(eid)}"
+    data-service="alarm_disarm" data-title="Disarm?" data-body="This will disarm the alarm."
+    class="w-full mt-2 py-3 rounded-xl border-2 border-ink/30 text-ink bg-ink/5 font-display font-semibold text-sm flex items-center justify-center gap-2 transition-colors active:scale-[0.98]">
+    <span aria-hidden="true" class="material-symbols-outlined text-lg">lock_open</span>
+    Disarm
+  </button>`;
+
+  if (!armButtons && !disarm) return '';
+  return `<div class="mt-3">
+    ${armButtons ? `<div class="flex gap-2">${armButtons}</div>` : ''}
+    ${disarm}
+  </div>`;
+}
+
+function buildPressControls(eid, domain) {
+  return `<div class="mt-3">
+    <button data-action="svc-cmd" data-eid="${esc(eid)}" data-domain="${domain}" data-service="press"
+      class="w-full py-3 rounded-xl border-2 border-accent/30 text-accent bg-accent/5 font-display font-semibold text-sm flex items-center justify-center gap-2 transition-colors active:scale-[0.98]">
+      <span aria-hidden="true" class="material-symbols-outlined text-lg">radio_button_checked</span>
+      Press
+    </button>
+  </div>`;
+}
+
+function buildCounterControls(eid, state) {
+  const value = isNaN(Number(state.state)) ? '--' : state.state;
+  const btn = (service, icon, label, extra = '') => `<button data-action="svc-cmd" data-eid="${esc(eid)}"
+    data-domain="counter" data-service="${service}" aria-label="${label}"
+    class="w-11 h-11 rounded-full border-2 border-border-light dark:border-border-dark bg-surface-light dark:bg-surface-dark flex items-center justify-center active:scale-95 transition-transform ${extra}">
+    <span aria-hidden="true" class="material-symbols-outlined">${icon}</span>
+  </button>`;
+  return `<div class="mt-3 flex items-center justify-center gap-4">
+    ${btn('decrement', 'remove', 'Decrease')}
+    <span class="text-2xl font-serif tabular-nums w-12 text-center">${esc(String(value))}</span>
+    ${btn('increment', 'add', 'Increase')}
+    ${btn('reset', 'restart_alt', 'Reset', 'text-muted')}
+  </div>`;
+}
+
+function formatDuration(totalSeconds) {
+  const pad = n => String(n).padStart(2, '0');
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const sec = totalSeconds % 60;
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
+// A running timer's `remaining` attribute is frozen at the value it had when the
+// state last changed, so the live figure has to come from finishes_at.
+function timerRemaining(state) {
+  if (state.state === 'active' && state.attributes?.finishes_at) {
+    const secs = (new Date(state.attributes.finishes_at).getTime() - Date.now()) / 1000;
+    if (!isNaN(secs)) return formatDuration(Math.max(0, Math.round(secs)));
+  }
+  const parts = String(state.attributes?.remaining || state.attributes?.duration || '').split(':').map(Number);
+  if (parts.length === 3 && parts.every(n => !isNaN(n))) {
+    return formatDuration(parts[0] * 3600 + parts[1] * 60 + parts[2]);
+  }
+  return '--:--';
+}
+
+function buildTimerControls(eid, state) {
+  const running = state.state === 'active';
+  const idle = state.state !== 'active' && state.state !== 'paused';
+  return `<div class="mt-3">
+    <div class="text-center text-2xl font-serif tabular-nums mb-3">${esc(timerRemaining(state))}</div>
+    <div class="grid ${idle ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
+      <button data-action="svc-cmd" data-eid="${esc(eid)}" data-domain="timer" data-service="${running ? 'pause' : 'start'}"
+        class="py-2.5 rounded-xl border-2 border-accent/30 text-accent bg-accent/5 font-display font-semibold text-sm flex items-center justify-center gap-1.5 active:scale-[0.98] transition-transform">
+        <span aria-hidden="true" class="material-symbols-outlined text-lg">${running ? 'pause' : 'play_arrow'}</span>
+        ${running ? 'Pause' : state.state === 'paused' ? 'Resume' : 'Start'}
+      </button>
+      ${idle ? '' : `<button data-action="svc-cmd" data-eid="${esc(eid)}" data-domain="timer" data-service="cancel"
+        class="py-2.5 rounded-xl border-2 border-primary/30 text-primary bg-primary/5 font-display font-semibold text-sm flex items-center justify-center gap-1.5 active:scale-[0.98] transition-transform">
+        <span aria-hidden="true" class="material-symbols-outlined text-lg">stop</span>
+        Cancel
+      </button>`}
+    </div>
+  </div>`;
+}
+
+function buildNumberControls(eid, state) {
+  const min = Number(state.attributes?.min ?? 0);
+  const max = Number(state.attributes?.max ?? 100);
+  const step = Number(state.attributes?.step ?? 1);
+  const unit = state.attributes?.unit_of_measurement || '';
+  const value = isNaN(Number(state.state)) ? min : Number(state.state);
+  return `<div data-slider-section class="mt-3">
+    <div class="flex items-center justify-between text-xs text-muted font-mono mb-1">
+      <span>${esc(String(min))}${esc(unit)}</span>
+      <span class="font-semibold text-ink" id="num-val-${cssId(eid)}">${esc(String(value))}${esc(unit)}</span>
+      <span>${esc(String(max))}${esc(unit)}</span>
+    </div>
+    <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" id="num-${cssId(eid)}"
+      aria-label="Value" data-range-action="input-number" data-eid="${esc(eid)}"
+      data-display-id="num-val-${cssId(eid)}" data-display-suffix="${esc(unit)}">
+  </div>`;
+}
+
+function buildTextControls(eid, state) {
+  const value = state.state === 'unknown' || state.state === 'unavailable' ? '' : state.state;
+  const maxlength = Number(state.attributes?.max);
+  const mode = state.attributes?.mode === 'password' ? 'password' : 'text';
+  return `<div class="mt-3">
+    <input type="${mode}" value="${esc(value)}" ${maxlength ? `maxlength="${maxlength}"` : ''} id="text-${cssId(eid)}"
+      aria-label="${esc(displayName(eid, state))}" data-value-action="text" data-eid="${esc(eid)}"
+      class="w-full py-2.5 px-3 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary">
+  </div>`;
+}
+
+function buildSelectControls(eid, state) {
+  const options = state.attributes?.options || [];
+  if (!options.length) return '';
+  return `<div class="mt-3">
+    <select id="sel-${cssId(eid)}" aria-label="${esc(displayName(eid, state))}"
+      data-value-action="select" data-eid="${esc(eid)}"
+      class="w-full py-2.5 px-3 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary">
+      ${options.map(o => `<option value="${esc(String(o))}"${o === state.state ? ' selected' : ''}>${esc(String(o))}</option>`).join('')}
+    </select>
+  </div>`;
+}
+
+// ── Date / time pickers ──────────────────────────────────────────────
+// One widget for three domains. time and datetime are fixed; an input_datetime
+// says what it holds in has_date / has_time.
+const DATETIME_DOMAINS = ['time', 'datetime', 'input_datetime'];
+
+function pickerMode(domain, state) {
+  if (domain === 'time') return 'time';
+  if (domain === 'datetime') return 'datetime';
+  const hasDate = state.attributes?.has_date;
+  const hasTime = state.attributes?.has_time;
+  if (hasDate && !hasTime) return 'date';
+  if (hasTime && !hasDate) return 'time';
+  return 'datetime';
+}
+
+// Normalises the HA state into what the matching <input> wants as its value.
+function pickerValue(domain, state, mode) {
+  const raw = state.state;
+  if (!raw || raw === 'unknown' || raw === 'unavailable') return '';
+  if (mode === 'time') return raw.slice(0, 8);
+  if (mode === 'date') return raw.slice(0, 10);
+  // datetime entities report an absolute UTC timestamp; input_datetime reports
+  // local wall-clock time with a space separator. Only the former converts.
+  if (domain === 'datetime') {
+    const d = new Date(raw);
+    if (isNaN(d)) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  return raw.replace(' ', 'T').slice(0, 16);
+}
+
+function buildPickerControls(eid, state) {
+  const domain = eid.split('.')[0];
+  const mode = pickerMode(domain, state);
+  return `<div class="mt-3 flex items-center gap-3">
+    <span aria-hidden="true" class="material-symbols-outlined text-base text-muted">${DOMAIN_ICONS[domain]}</span>
+    <input type="${mode === 'datetime' ? 'datetime-local' : mode}" ${mode === 'time' ? 'step="1"' : ''}
+      value="${esc(pickerValue(domain, state, mode))}" id="dt-${cssId(eid)}"
+      aria-label="${esc(displayName(eid, state))}" data-value-action="picker" data-eid="${esc(eid)}"
+      class="flex-1 py-2.5 px-3 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary">
+  </div>`;
+}
+
 // ── Card Updates (live SSE) ──────────────────────────────────────────
+// Widgets whose shape follows the state — which buttons exist, what the options
+// are, where the slider sits — are cheapest to rebuild wholesale.
+const REBUILD_DOMAINS = ['alarm_control_panel', 'counter', 'timer',
+  'input_number', 'input_text', 'input_select', 'time', 'datetime', 'input_datetime'];
+
+function rebuildCard(eid, state, card) {
+  // A card the guest is mid-way through editing keeps its DOM: the update that
+  // lands here is usually the echo of their own change, and replacing the node
+  // would steal focus and discard whatever they have typed since.
+  if (card.contains(document.activeElement)) return;
+  const parent = card.parentElement;
+  if (!parent) return;
+  const fresh = document.createElement('div');
+  fresh.innerHTML = buildCard(eid, state);
+  parent.replaceChild(fresh.firstElementChild, card);
+  const freshCard = document.getElementById(`card-${cssId(eid)}`);
+  if (freshCard) {
+    freshCard.classList.remove('pulse');
+    void freshCard.offsetWidth;
+    freshCard.classList.add('pulse');
+  }
+}
+
 function updateCard(eid, state) {
   const card = document.getElementById(`card-${cssId(eid)}`);
   if (!card) return;
@@ -632,14 +906,16 @@ function updateCard(eid, state) {
   card.classList.toggle('opacity-60', isOff);
 
   // Domain-specific updates may replaceChild, so pulse is handled there
-  const needsPulse = domain !== 'light' && domain !== 'fan';
+  const rebuilds = REBUILD_DOMAINS.includes(domain);
+  const needsPulse = domain !== 'light' && domain !== 'fan' && !rebuilds;
 
   if (domain === 'light') updateLightCard(eid, state, card);
-  else if (domain === 'switch' || domain === 'input_boolean') updateToggleCard(state, card);
+  else if (domain === 'switch' || domain === 'input_boolean' || domain === 'group') updateToggleCard(state, card);
   else if (domain === 'climate') updateClimateCard(eid, state);
   else if (domain === 'lock') updateLockCard(eid, state);
   else if (domain === 'media_player') updateMediaCard(eid, state);
   else if (domain === 'fan') updateFanCard(eid, state, card);
+  else if (rebuilds) rebuildCard(eid, state, card);
 
   if (needsPulse) {
     card.classList.remove('pulse');
@@ -859,6 +1135,20 @@ function sendToggle(eid, domain) {
   if (states[eid]) states[eid] = { ...states[eid], state: newState === 'turn_on' ? 'on' : 'off' };
   sendCmd(eid, domain, newState);
 }
+function sendPickerValue(eid, value) {
+  if (!value) return;
+  const domain = eid.split('.')[0];
+  // HA wants whole seconds, and names the same value differently per domain.
+  const withSeconds = v => (v.length === 5 ? `${v}:00` : v);
+  const asDatetime = v => v.replace('T', ' ') + (v.length === 16 ? ':00' : '');
+  if (domain === 'time') { sendCmd(eid, 'time', 'set_value', { time: withSeconds(value) }); return; }
+  if (domain === 'datetime') { sendCmd(eid, 'datetime', 'set_value', { datetime: asDatetime(value) }); return; }
+  const mode = pickerMode(domain, states[eid] || {});
+  const field = mode === 'date' ? { date: value }
+    : mode === 'time' ? { time: withSeconds(value) }
+    : { datetime: asDatetime(value) };
+  sendCmd(eid, 'input_datetime', 'set_datetime', field);
+}
 function sendBrightness(eid, pct) { sendCmd(eid, 'light', 'turn_on', { brightness: Math.round((parseInt(pct) / 100) * 255) }); }
 function sendMediaCmd(eid, service) { sendCmd(eid, 'media_player', service); }
 function sendVolume(eid, pct) { sendCmd(eid, 'media_player', 'volume_set', { volume_level: parseInt(pct) / 100 }); }
@@ -887,6 +1177,32 @@ function confirmLock(eid, currentlyLocked) {
   openSheet();
 }
 
+// ── Alarm Confirm (shared bottom sheet) ──────────────────────────────
+// The code input lives in the same sheet as the lock confirmations rather than
+// in a second modal. It is only revealed for panels that ask for a code.
+function showSheetCode(inputMode) {
+  const input = document.getElementById('sheet-code');
+  input.value = '';
+  document.getElementById('sheet-code-wrap').classList.toggle('hidden', !inputMode);
+  if (inputMode) input.setAttribute('inputmode', inputMode);
+}
+
+function confirmAlarm(eid, service, title, body) {
+  const attrs = states[eid]?.attributes || {};
+  // code_arm_required: false means the panel only wants the code to disarm.
+  const needsCode = Boolean(attrs.code_format)
+    && (service === 'alarm_disarm' || attrs.code_arm_required !== false);
+  document.getElementById('sheet-title').textContent = title;
+  document.getElementById('sheet-body').textContent = body;
+  showSheetCode(needsCode ? (attrs.code_format === 'number' ? 'numeric' : 'text') : null);
+  sheetCallback = () => {
+    const code = document.getElementById('sheet-code').value;
+    sendCmd(eid, 'alarm_control_panel', service, code ? { code } : {});
+    closeSheet();
+  };
+  openSheet();
+}
+
 function confirmLockOpen(eid) {
   document.getElementById('sheet-title').textContent = 'Open latch?';
   document.getElementById('sheet-body').textContent = 'This will open the latch.';
@@ -909,6 +1225,7 @@ function closeSheet() {
   if (dialog) dialog.removeEventListener('keydown', _handleTrapKeydown);
   backdrop.classList.remove('flex');
   backdrop.classList.add('hidden');
+  showSheetCode(null);  // never leave an alarm code sitting in the DOM
   sheetCallback = null;
   releaseFocus();
 }
@@ -957,6 +1274,13 @@ document.addEventListener('click', e => {
     case 'cover-cmd':
       sendCmd(eid, 'cover', el.dataset.service);
       break;
+    case 'svc-cmd':
+      // Buttons, counters and timers: one tap, one service, no payload.
+      sendCmd(eid, el.dataset.domain, el.dataset.service);
+      break;
+    case 'confirm-alarm':
+      confirmAlarm(eid, el.dataset.service, el.dataset.title, el.dataset.body);
+      break;
     case 'close-sheet':
       closeSheet();
       break;
@@ -985,17 +1309,26 @@ document.addEventListener('input', e => {
   const el = e.target;
   if (!el.dataset.rangeAction) return;
   const display = document.getElementById(el.dataset.displayId);
-  if (display) display.textContent = el.value + '%';
+  if (display) display.textContent = el.value + (el.dataset.displaySuffix ?? '%');
 });
 
 document.addEventListener('change', e => {
   const el = e.target;
-  if (!el.dataset.rangeAction) return;
   const eid = el.dataset.eid;
+  // Text, select and date/time widgets commit on change rather than per keystroke.
+  if (el.dataset.valueAction) {
+    const kind = el.dataset.valueAction;
+    if (kind === 'picker') sendPickerValue(eid, el.value);
+    else if (kind === 'text') sendCmd(eid, 'input_text', 'set_value', { value: el.value });
+    else if (kind === 'select') sendCmd(eid, 'input_select', 'select_option', { option: el.value });
+    return;
+  }
+  if (!el.dataset.rangeAction) return;
   const action = el.dataset.rangeAction;
   if (action === 'brightness') sendBrightness(eid, el.value);
   else if (action === 'volume') sendVolume(eid, el.value);
   else if (action === 'fan-speed') sendCmd(eid, 'fan', 'set_percentage', { percentage: parseInt(el.value) });
+  else if (action === 'input-number') sendCmd(eid, 'input_number', 'set_value', { value: parseFloat(el.value) });
 });
 
 // ── Install Banner ───────────────────────────────────────────────────
