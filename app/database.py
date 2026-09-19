@@ -95,6 +95,7 @@ async def create_token(
     entity_ids: list[str],
     expires_at: int,
     ip_allowlist: list[str] | None,
+    entity_meta: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     db = await get_db()
     token_id = str(uuid.uuid4())
@@ -113,9 +114,20 @@ async def create_token(
             (token_id, slug, label, now, expires_at, ip_json),
         )
         if entity_ids:
+            meta = entity_meta or {}
             await db.executemany(
-                "INSERT INTO token_entities (token_id, entity_id) VALUES (?, ?)",
-                [(token_id, eid) for eid in entity_ids],
+                "INSERT INTO token_entities (token_id, entity_id, display_name, options) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        token_id,
+                        eid,
+                        (meta.get(eid) or {}).get("display_name"),
+                        json.dumps((meta.get(eid) or {}).get("options"))
+                        if (meta.get(eid) or {}).get("options") else None,
+                    )
+                    for eid in entity_ids
+                ],
             )
         await db.execute("COMMIT")
     except Exception:
@@ -157,16 +169,80 @@ async def get_token_entities(token_id: str) -> list[str]:
     return [r["entity_id"] for r in rows]
 
 
-async def update_token_entities(token_id: str, entity_ids: list[str]) -> None:
+async def get_token_entity_meta(token_id: str) -> dict[str, dict[str, Any]]:
+    """entity_id -> {"display_name": str|None, "options": dict}.
+
+    Kept separate from get_token_entities() on purpose: that function returns the
+    plain id list the allowlist checks depend on, and must not grow a shape the
+    security path has to unpack.
+    """
+    db = await get_db()
+    async with db.execute(
+        "SELECT entity_id, display_name, options FROM token_entities WHERE token_id = ?",
+        (token_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    meta: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        opts = {}
+        if r["options"]:
+            try:
+                opts = json.loads(r["options"])
+            except (ValueError, TypeError):
+                opts = {}
+        meta[r["entity_id"]] = {"display_name": r["display_name"], "options": opts}
+    return meta
+
+
+async def set_entity_meta(
+    token_id: str,
+    entity_id: str,
+    display_name: str | None,
+    options: dict[str, Any] | None,
+) -> bool:
+    """Set one entity's display name and options. False if not on the token."""
+    db = await get_db()
+    cur = await db.execute(
+        "UPDATE token_entities SET display_name = ?, options = ? "
+        "WHERE token_id = ? AND entity_id = ?",
+        (display_name, json.dumps(options) if options else None, token_id, entity_id),
+    )
+    await db.commit()
+    return cur.rowcount > 0
+
+
+async def update_token_entities(
+    token_id: str,
+    entity_ids: list[str],
+    entity_meta: dict[str, dict[str, Any]] | None = None,
+) -> None:
     db = await get_db()
     # Deduplicate entity IDs
     entity_ids = list(dict.fromkeys(entity_ids))
     try:
         await db.execute("BEGIN IMMEDIATE")
+        # This rebuilds the whole row set, so per-entity display names and options
+        # already stored would be silently dropped unless they are read back first
+        # and re-applied. An explicit entity_meta argument wins over what is stored.
+        async with db.execute(
+            "SELECT entity_id, display_name, options FROM token_entities WHERE token_id = ?",
+            (token_id,),
+        ) as cur:
+            existing = {
+                r["entity_id"]: (r["display_name"], r["options"])
+                for r in await cur.fetchall()
+            }
+        for eid, m in (entity_meta or {}).items():
+            name = m.get("display_name")
+            opts = m.get("options")
+            existing[eid] = (name, json.dumps(opts) if opts else None)
+
         await db.execute("DELETE FROM token_entities WHERE token_id = ?", (token_id,))
         await db.executemany(
-            "INSERT INTO token_entities (token_id, entity_id) VALUES (?, ?)",
-            [(token_id, eid) for eid in entity_ids],
+            "INSERT INTO token_entities (token_id, entity_id, display_name, options) "
+            "VALUES (?, ?, ?, ?)",
+            [(token_id, eid, *existing.get(eid, (None, None))) for eid in entity_ids],
         )
         await db.execute("COMMIT")
     except Exception:

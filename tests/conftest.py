@@ -15,6 +15,7 @@ os.environ.setdefault("HA_TOKEN", "test-token")
 
 import pytest
 import pytest_asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import database as db
@@ -45,6 +46,16 @@ async def test_db(tmp_path):
     settings.db_path = original_path
 
 
+@asynccontextmanager
+async def _fake_camera_stream(entity_id: str):
+    """Stand-in for ha_client.camera_stream — same async-CM shape, canned frames."""
+    async def _chunks():
+        yield b"--frameboundary\r\nContent-Type: image/jpeg\r\n\r\n"
+        yield b"\xff\xd8fake-frame"
+
+    yield "multipart/x-mixed-replace; boundary=--frameboundary", _chunks()
+
+
 @pytest.fixture
 def mock_ha_client():
     """Patch the Home Assistant external dependency.
@@ -68,6 +79,8 @@ def mock_ha_client():
         "logbook_log": AsyncMock(return_value={}),
         "broadcast_token_expired": AsyncMock(),
         "invalidate_entity_cache": AsyncMock(),
+        "camera_snapshot": AsyncMock(return_value=(b"\xff\xd8fake-jpeg", "image/jpeg")),
+        "camera_stream": _fake_camera_stream,
     }
     with patch.multiple("app.ha_client", **mocks):
         yield mocks

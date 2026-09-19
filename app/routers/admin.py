@@ -13,6 +13,9 @@ from app.config import settings
 from app import ha_client
 from app.models import (
     AdminLoginRequest,
+    DISPLAY_NAME_MAX,
+    ENTITY_OPTION_KEYS,
+    EntityMetaRequest,
     NEVER_EXPIRES_SECONDS,
     SUPPORTED_DOMAINS,
     TokenCreateRequest,
@@ -83,7 +86,8 @@ async def logout(response: Response, session_id: str = Depends(require_admin)) -
 # Token management
 # ---------------------------------------------------------------------------
 
-def _row_to_response(row: Any, entity_ids: list[str] | None = None) -> dict:
+def _row_to_response(row: Any, entity_ids: list[str] | None = None,
+                     entity_meta: dict[str, dict[str, Any]] | None = None) -> dict:
     ip_raw = row["ip_allowlist"]
     ip_list = json.loads(ip_raw) if ip_raw else None
     if entity_ids is not None:
@@ -103,6 +107,7 @@ def _row_to_response(row: Any, entity_ids: list[str] | None = None) -> dict:
         "ip_allowlist": ip_list,
         "entity_count": count,
         "entity_ids": entity_ids,
+        "entity_meta": entity_meta,
     }
 
 
@@ -169,9 +174,65 @@ async def create_token(
         entity_ids=body.entity_ids,
         expires_at=expires_at,
         ip_allowlist=body.ip_allowlist,
+        entity_meta=_clean_entity_meta(body.entity_meta),
     )
     entity_ids = await db.get_token_entities(row["id"])
     return _row_to_response(row, entity_ids)
+
+
+def _clean_name(value: Any) -> str | None:
+    """Trim and cap a display name. Blank means 'no override'."""
+    if not isinstance(value, str):
+        return None
+    return value.strip()[:DISPLAY_NAME_MAX] or None
+
+
+def _clean_options(value: Any) -> dict[str, Any] | None:
+    """Keep only allow-listed option keys, coerced to bool."""
+    if not isinstance(value, dict):
+        return None
+    cleaned = {k: bool(v) for k, v in value.items() if k in ENTITY_OPTION_KEYS and v}
+    return cleaned or None
+
+
+def _clean_entity_meta(
+    meta: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]] | None:
+    if not meta:
+        return None
+    cleaned = {}
+    for eid, m in meta.items():
+        if not isinstance(m, dict):
+            continue
+        name = _clean_name(m.get("display_name"))
+        opts = _clean_options(m.get("options"))
+        if name or opts:
+            cleaned[eid] = {"display_name": name, "options": opts}
+    return cleaned or None
+
+
+@router.patch("/tokens/{token_id}/entity-meta")
+async def set_entity_meta(
+    token_id: str,
+    body: EntityMetaRequest,
+    _: str = Depends(require_admin),
+) -> dict:
+    row = await db.get_token_by_id(token_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    name = _clean_name(body.display_name)
+    opts = _clean_options(body.options)
+
+    updated = await db.set_entity_meta(token_id, body.entity_id, name, opts)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Entity not on this token",
+        )
+
+    await ha_client.invalidate_entity_cache(token_id)
+    return {"entity_id": body.entity_id, "display_name": name, "options": opts or {}}
 
 
 @router.get("/tokens/{token_id}")
@@ -180,7 +241,8 @@ async def get_token(token_id: str, _: str = Depends(require_admin)) -> dict:
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     entity_ids = await db.get_token_entities(token_id)
-    return _row_to_response(row, entity_ids)
+    meta = await db.get_token_entity_meta(token_id)
+    return _row_to_response(row, entity_ids, meta)
 
 
 @router.patch("/tokens/{token_id}/entities")
@@ -197,11 +259,14 @@ async def update_token_entities(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot edit entities on a revoked token",
         )
-    await db.update_token_entities(token_id, body.entity_ids)
+    await db.update_token_entities(
+        token_id, body.entity_ids, _clean_entity_meta(body.entity_meta)
+    )
     await ha_client.invalidate_entity_cache(token_id)
     entity_ids = await db.get_token_entities(token_id)
+    meta = await db.get_token_entity_meta(token_id)
     row = await db.get_token_by_id(token_id)
-    return _row_to_response(row, entity_ids)
+    return _row_to_response(row, entity_ids, meta)
 
 
 @router.patch("/tokens/{token_id}/expiry")

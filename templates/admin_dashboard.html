@@ -214,6 +214,38 @@
   </div>
 </div>
 
+<!-- Entity Settings Modal -->
+<div class="fixed inset-0 z-[60] hidden items-center justify-center p-4 bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="entity-modal">
+  <div class="modal-animate bg-surface-light dark:bg-surface-dark border border-border-light dark:border-border-dark rounded-2xl p-6 w-full max-w-md shadow-xl" role="dialog" aria-modal="true" aria-labelledby="entity-modal-title">
+    <div class="flex items-center justify-between mb-3">
+      <h2 id="entity-modal-title" class="text-lg font-serif">Entity settings</h2>
+      <button data-action="close-modal" data-modal="entity" aria-label="Close dialog" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-soot/5 dark:hover:bg-white/5 text-muted transition-colors">
+        <span aria-hidden="true" class="material-symbols-outlined text-xl">close</span>
+      </button>
+    </div>
+    <div id="entity-modal-eid" class="text-[11px] text-muted font-mono mb-4 truncate"></div>
+
+    <label class="block text-xs font-display font-semibold mb-1.5" for="entity-display-name">Display name</label>
+    <input id="entity-display-name" type="text" maxlength="64"
+      class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary"
+      placeholder="">
+    <p class="text-[11px] text-muted mt-1.5">Shown to the guest instead of the Home Assistant name. Leave blank to use <span id="entity-fallback-name" class="font-medium"></span>.</p>
+
+    <div id="entity-light-options" class="mt-4 hidden">
+      <label class="flex items-center gap-2.5 cursor-pointer">
+        <input id="entity-show-brightness" type="checkbox" class="w-4 h-4 rounded border-border-light dark:border-border-dark accent-primary">
+        <span class="text-sm">Show brightness slider</span>
+      </label>
+      <p class="text-[11px] text-muted mt-1.5 ml-6.5">Off by default — the guest gets on/off only.</p>
+    </div>
+
+    <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-border-light dark:border-border-dark">
+      <button data-action="close-modal" data-modal="entity" class="px-4 py-2 text-sm font-display font-medium rounded-xl border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
+      <button data-action="submit-entity-meta" class="px-4 py-2 text-sm font-display font-semibold rounded-xl bg-primary hover:bg-primary-hover text-white transition-colors">Apply</button>
+    </div>
+  </div>
+</div>
+
 <!-- Edit Entities Modal -->
 <div class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="edit-modal">
   <div class="modal-animate bg-surface-light dark:bg-surface-dark border border-border-light dark:border-border-dark rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-xl" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
@@ -329,8 +361,10 @@ let activityExpanded = false;
 const ACTIVITY_COLLAPSED_COUNT = 3;
 
 // Picker state (separate for create vs edit)
-let createPicker = { selected: new Set(), filter: 'all', search: '' };
-let editPicker = { selected: new Set(), filter: 'all', search: '' };
+let createPicker = { selected: new Set(), filter: 'all', search: '', meta: {} };
+let editPicker = { selected: new Set(), filter: 'all', search: '', meta: {} };
+// Which picker + entity the entity-settings modal is currently editing.
+let entityModalCtx = { containerId: null, entityId: null };
 let editTokenId = null;
 
 // ── Auth ──────────────────────────────────────────────────────────────
@@ -669,16 +703,28 @@ function renderPicker(containerId, pickerState) {
     <div class="mb-3">
       <div class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted mb-1.5 px-1">Selected (${allSelected.length})</div>
       <ul class="picker-list max-h-44 overflow-y-auto border border-border-light dark:border-border-dark rounded-xl bg-surface-light dark:bg-surface-dark list-none" role="list">
-        ${allSelected.map(e => `<li class="flex items-center gap-3 px-3 py-2.5 border-b border-border-light dark:border-border-dark last:border-b-0 hover:bg-soot/[0.03] dark:hover:bg-white/5 cursor-pointer transition-colors" data-action="picker-remove" data-container="${containerId}" data-entity="${esc(e.entity_id)}" role="button" tabindex="0" aria-label="Remove ${esc(e.friendly_name || e.entity_id)}">
+        ${allSelected.map(e => {
+          const m = pickerState.meta[e.entity_id] || {};
+          const renamed = m.display_name;
+          const showsBrightness = m.options && m.options.show_brightness;
+          return `<li class="flex items-center gap-3 px-3 py-2.5 border-b border-border-light dark:border-border-dark last:border-b-0 hover:bg-soot/[0.03] dark:hover:bg-white/5 cursor-pointer transition-colors" data-action="picker-edit" data-container="${containerId}" data-entity="${esc(e.entity_id)}" role="button" tabindex="0" aria-label="Edit ${esc(renamed || e.friendly_name || e.entity_id)}">
           <div class="w-7 h-7 rounded-full ${DOMAIN_COLORS[e.domain]?.icon || 'bg-gray-500'} flex items-center justify-center flex-shrink-0">
             <span aria-hidden="true" class="material-symbols-outlined text-white text-sm">${PICKER_ICONS[e.domain] || 'devices'}</span>
           </div>
           <div class="flex-1 min-w-0">
-            <div class="text-sm font-medium truncate">${esc(e.friendly_name || e.entity_id)}</div>
+            <div class="text-sm font-medium truncate flex items-center gap-1.5">
+              ${esc(renamed || e.friendly_name || e.entity_id)}
+              ${renamed ? '<span aria-hidden="true" class="material-symbols-outlined text-accent" style="font-size:14px" title="Renamed">edit</span>' : ''}
+              ${showsBrightness ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Brightness slider shown">brightness_high</span>' : ''}
+            </div>
             <div class="text-[11px] text-muted font-mono truncate">${esc(e.entity_id)}</div>
           </div>
-          <span aria-hidden="true" class="material-symbols-outlined text-primary text-lg flex-shrink-0">remove_circle</span>
-        </li>`).join('')}
+          <button type="button" data-action="picker-remove" data-container="${containerId}" data-entity="${esc(e.entity_id)}"
+            aria-label="Remove ${esc(e.friendly_name || e.entity_id)}"
+            class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-primary/10 text-primary flex-shrink-0 transition-colors">
+            <span aria-hidden="true" class="material-symbols-outlined text-lg">remove_circle</span>
+          </button>
+        </li>`; }).join('')}
       </ul>
     </div>` : ''}
     <div class="mb-2">
@@ -729,7 +775,7 @@ function pickerRemove(containerId, entityId) {
 
 // ── Create Token Modal ────────────────────────────────────────────────
 function openCreateModal(preset = {}) {
-  createPicker = { selected: new Set(preset.entityIds || []), filter: 'all', search: '' };
+  createPicker = { selected: new Set(preset.entityIds || []), filter: 'all', search: '', meta: {} };
   document.getElementById('create-modal-title').textContent = preset.title || 'Create Guest Token';
   document.getElementById('f-label').value = preset.label || '';
   document.getElementById('f-slug').value = '';
@@ -761,6 +807,7 @@ async function submitCreate() {
   const body = {
     label, slug,
     entity_ids: [...createPicker.selected],
+    entity_meta: createPicker.meta,
     expires_in_seconds: expiresIn,
     ip_allowlist: ipList,
   };
@@ -798,10 +845,69 @@ async function duplicateToken(tokenId) {
   });
 }
 
+// ── Entity Settings Modal ─────────────────────────────────────────────
+// Overrides are held in picker state and written with the entity list on Save,
+// so closing the token modal without saving discards them, same as add/remove.
+function openEntityModal(containerId, entityId) {
+  const pickerState = getPickerState(containerId);
+  entityModalCtx = { containerId, entityId };
+
+  const ent = allEntities.find(e => e.entity_id === entityId) || {};
+  const meta = pickerState.meta[entityId] || {};
+  const fallback = ent.friendly_name || entityId;
+
+  document.getElementById('entity-modal-eid').textContent = entityId;
+  document.getElementById('entity-fallback-name').textContent = fallback;
+
+  const nameInput = document.getElementById('entity-display-name');
+  nameInput.value = meta.display_name || '';
+  nameInput.placeholder = fallback;
+
+  const lightOpts = document.getElementById('entity-light-options');
+  const isLight = entityId.split('.')[0] === 'light';
+  lightOpts.classList.toggle('hidden', !isLight);
+  document.getElementById('entity-show-brightness').checked =
+    Boolean(meta.options && meta.options.show_brightness);
+
+  openModal('entity-modal');
+  nameInput.focus();
+}
+
+function closeEntityModal() {
+  closeModal('entity-modal');
+  entityModalCtx = { containerId: null, entityId: null };
+}
+
+function submitEntityMeta() {
+  const { containerId, entityId } = entityModalCtx;
+  if (!containerId || !entityId) return;
+  const pickerState = getPickerState(containerId);
+
+  const name = document.getElementById('entity-display-name').value.trim().slice(0, 64);
+  const isLight = entityId.split('.')[0] === 'light';
+  const showBrightness = isLight && document.getElementById('entity-show-brightness').checked;
+
+  const options = {};
+  if (showBrightness) options.show_brightness = true;
+
+  if (name || Object.keys(options).length) {
+    pickerState.meta[entityId] = {
+      display_name: name || null,
+      options: Object.keys(options).length ? options : null,
+    };
+  } else {
+    delete pickerState.meta[entityId];
+  }
+
+  closeModal('entity-modal');
+  entityModalCtx = { containerId: null, entityId: null };
+  renderPicker(containerId, pickerState);
+}
+
 // ── Edit Entities Modal ───────────────────────────────────────────────
 async function openEditModal(tokenId) {
   editTokenId = tokenId;
-  editPicker = { selected: new Set(), filter: 'all', search: '' };
+  editPicker = { selected: new Set(), filter: 'all', search: '', meta: {} };
   document.getElementById('edit-error').textContent = '';
   document.getElementById('edit-token-label').textContent = 'Loading...';
   document.getElementById('edit-picker').innerHTML = '<div class="text-center py-8 text-muted text-sm">Loading entities...</div>';
@@ -814,6 +920,7 @@ async function openEditModal(tokenId) {
   if (token.entity_ids) {
     token.entity_ids.forEach(id => editPicker.selected.add(id));
   }
+  editPicker.meta = token.entity_meta || {};
   renderPicker('edit-picker', editPicker);
 }
 function closeEditModal() { closeModal('edit-modal'); editTokenId = null; document.getElementById('edit-picker').innerHTML = ''; }
@@ -826,7 +933,7 @@ async function submitEditEntities() {
   const r = await fetch(`${BASE}/admin/tokens/${editTokenId}/entities`, {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ entity_ids: [...editPicker.selected] }),
+    body: JSON.stringify({ entity_ids: [...editPicker.selected], entity_meta: editPicker.meta }),
   });
 
   if (r.ok) {
@@ -1153,7 +1260,7 @@ document.addEventListener('click', e => {
 
     // Close any modal
     case 'close-modal': {
-      const modalMap = { create: closeCreateModal, edit: closeEditModal, extend: closeExtendModal, confirm: closeConfirmModal, qr: closeQrModal };
+      const modalMap = { create: closeCreateModal, edit: closeEditModal, extend: closeExtendModal, confirm: closeConfirmModal, qr: closeQrModal, entity: closeEntityModal };
       const closer = modalMap[el.dataset.modal];
       if (closer) closer();
       break;
@@ -1167,6 +1274,8 @@ document.addEventListener('click', e => {
 
     // Entity picker
     case 'picker-remove': pickerRemove(el.dataset.container, el.dataset.entity); break;
+    case 'picker-edit': openEntityModal(el.dataset.container, el.dataset.entity); break;
+    case 'submit-entity-meta': submitEntityMeta(); break;
     case 'picker-add': pickerAdd(el.dataset.container, el.dataset.entity); break;
     case 'picker-filter': setPickerFilter(el.dataset.container, el.dataset.domain); break;
   }

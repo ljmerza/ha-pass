@@ -2,7 +2,8 @@
 import asyncio
 import json
 import logging
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -24,6 +25,9 @@ WS_PING_INTERVAL = 30
 WS_BACKOFF_INIT = 2
 WS_BACKOFF_MAX = 60
 MAX_AUTH_RETRIES = 5
+# Camera MJPEG is an intentionally long-lived response, so the 10s read timeout
+# that suits the REST calls would kill it. Connect/write stay bounded.
+CAMERA_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 
 # ---------------------------------------------------------------------------
 # Persistent HTTP client
@@ -209,6 +213,45 @@ async def logbook_log(data: dict) -> Any:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Camera proxying
+# ---------------------------------------------------------------------------
+# Both helpers take an entity_id that the CALLER must already have validated
+# against the token allowlist and the camera entity-id regex. Nothing here
+# re-checks it — these functions hold the privileged HA token.
+
+async def camera_snapshot(entity_id: str) -> tuple[bytes, str]:
+    """Fetch a single still frame for one camera entity."""
+    async def _do():
+        resp = await _require_client().get(f"/api/camera_proxy/{entity_id}")
+        resp.raise_for_status()
+        return resp
+
+    resp = await _retry_http(_do)
+    return resp.content, resp.headers.get("content-type", "image/jpeg")
+
+
+@asynccontextmanager
+async def camera_stream(entity_id: str) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+    """Open HA's MJPEG stream for one camera.
+
+    Yields (content_type, raw byte iterator). The upstream connection stays open
+    for the lifetime of the context, so the caller must close it when the guest
+    disconnects or the connection leaks.
+    """
+    client = _require_client()
+    async with client.stream(
+        "GET",
+        f"/api/camera_proxy_stream/{entity_id}",
+        timeout=CAMERA_STREAM_TIMEOUT,
+    ) as resp:
+        resp.raise_for_status()
+        ctype = resp.headers.get(
+            "content-type", "multipart/x-mixed-replace; boundary=--frameboundary"
+        )
+        yield ctype, resp.aiter_raw()
 
 
 async def validate_connectivity() -> None:

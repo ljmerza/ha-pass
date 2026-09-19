@@ -120,14 +120,6 @@
         </span>
       </div>
     </div>
-    <!-- Countdown timer bar -->
-    <div id="expiry-section" class="mt-2.5 flex items-center gap-2">
-      <span class="text-[10px] font-mono font-bold text-muted uppercase tracking-wider">Remaining</span>
-      <div class="flex-1 h-1.5 bg-soot/10 dark:bg-white/10 rounded-full overflow-hidden">
-        <div id="expiry-bar" class="h-full bg-accent rounded-full transition-all duration-1000"></div>
-      </div>
-      <span id="expiry-timer" class="text-xs font-bold font-mono text-muted tabular-nums"></span>
-    </div>
   </div>
 </header>
 
@@ -191,62 +183,28 @@ const SLUG = {{ slug | tojson }};
 const EXPIRES_AT = {{ expires_at | tojson }};
 const NEVER_EXPIRES = {{ never_expires }};
 let states = {};
+// Per-token presentation overrides: { entity_id: {display_name, options} }
+let entityMeta = {};
 let entityOrder = [];
 let sheetCallback = null;
 let sseRetryCount = 0;
 
-// ── Expiry Timer ─────────────────────────────────────────────────────
-const INITIAL_REMAINING = EXPIRES_AT - (Date.now() / 1000);
-
-function updateExpiry() {
-  if (EXPIRES_AT >= NEVER_EXPIRES) {
-    const section = document.getElementById('expiry-section');
-    if (section) {
-      section.innerHTML = '<span class="text-xs text-muted font-mono">No expiration</span>';
-    }
-    return;
-  }
-  const el = document.getElementById('expiry-timer');
-  const bar = document.getElementById('expiry-bar');
-  const now = Date.now() / 1000;
-  const remaining = EXPIRES_AT - now;
-
-  if (remaining <= 0) {
-    el.textContent = 'Expired';
-    el.className = 'text-xs font-bold font-mono text-primary tabular-nums';
-    if (bar) bar.style.width = '0%';
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    clearInterval(expiryInterval);
-    showExpired();
-    return;
-  }
-
-  if (bar && INITIAL_REMAINING > 0) {
-    const pct = Math.max(0, Math.min(100, (remaining / INITIAL_REMAINING) * 100));
-    bar.style.width = pct + '%';
-    if (remaining < 600) bar.className = 'h-full bg-primary rounded-full transition-all duration-1000';
-    else if (remaining < 3600) bar.className = 'h-full bg-amber-500 rounded-full transition-all duration-1000';
-    else bar.className = 'h-full bg-accent rounded-full transition-all duration-1000';
-  }
-
-  if (remaining < 600) el.className = 'text-xs font-bold font-mono text-primary tabular-nums';
-  else if (remaining < 3600) el.className = 'text-xs font-bold font-mono text-amber-500 tabular-nums';
-  else el.className = 'text-xs font-bold font-mono text-muted tabular-nums';
-
-  const h = Math.floor(remaining / 3600);
-  const m = Math.floor((remaining % 3600) / 60);
-  if (h > 24) {
-    const d = Math.floor(h / 24);
-    el.textContent = `${d}d ${h % 24}h`;
-  } else if (h > 0) {
-    el.textContent = `${h}h ${m}m`;
-  } else {
-    el.textContent = `${m}m`;
-  }
+// ── Expiry watchdog ──────────────────────────────────────────────────
+// Nothing about expiry is shown to the guest — no countdown, no "no
+// expiration" label. This only exists so a page left open when the token dies
+// flips to the expired screen instead of sitting there with stale controls.
+// The SSE token_expired event and the 410 on refresh cover the same ground;
+// this is the belt for when the stream is down.
+function checkExpiry() {
+  if (EXPIRES_AT >= NEVER_EXPIRES) return;
+  if (EXPIRES_AT - (Date.now() / 1000) > 0) return;
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  clearInterval(expiryInterval);
+  showExpired();
 }
-updateExpiry();
+checkExpiry();
 let expiryInterval = setInterval(() => {
-  if (document.visibilityState === 'visible') updateExpiry();
+  if (document.visibilityState === 'visible') checkExpiry();
 }, 60000);
 
 // ── Init ─────────────────────────────────────────────────────────────
@@ -258,6 +216,7 @@ async function init() {
     const data = await r.json();
     states = data.states;
     entityOrder = data.entities;
+    entityMeta = data.entity_meta || {};
     renderAll();
     connectSSE();
   } catch (e) {
@@ -369,7 +328,7 @@ function renderAll() {
 function buildCard(eid, state) {
   if (!state) return '';
   const domain = eid.split('.')[0];
-  const name = state.attributes?.friendly_name || eid;
+  const name = displayName(eid, state);
   const stateStr = state.state;
   const color = DOMAIN_COLORS[domain] || { bg: 'bg-gray-500/10', text: 'text-gray-500', icon: 'bg-gray-500' };
   const icon = DOMAIN_ICONS[domain] || 'devices';
@@ -378,7 +337,8 @@ function buildCard(eid, state) {
   const opacityClass = isOff ? 'opacity-60' : '';
 
   let controls = '';
-  if (domain === 'light') controls = buildLightControls(eid, state);
+  if (domain === 'camera') controls = buildCameraControls(eid, state);
+  else if (domain === 'light') controls = buildLightControls(eid, state);
   else if (domain === 'switch' || domain === 'input_boolean') controls = '';
   else if (domain === 'climate') controls = buildClimateControls(eid, state);
   else if (domain === 'lock') controls = buildLockControls(eid, state);
@@ -393,7 +353,13 @@ function buildCard(eid, state) {
     data-action="toggle" data-eid="${esc(eid)}" data-domain="${domain}"
     ></div>` : '';
 
-  return `<div class="bg-surface-light dark:bg-surface-dark rounded-2xl p-4 mb-2.5 shadow-card border border-border-light dark:border-border-dark ${opacityClass}" id="card-${cssId(eid)}">
+  // The whole tile is the hit target for anything with a toggle; domains with
+  // their own controls (climate, lock, cover, media, camera) are left alone.
+  const cardTap = hasToggle
+    ? `data-action="card-toggle" data-eid="${esc(eid)}" data-domain="${domain}" role="button" tabindex="0" aria-label="Toggle ${esc(name)}" `
+    : '';
+
+  return `<div ${cardTap}class="bg-surface-light dark:bg-surface-dark rounded-2xl p-4 mb-2.5 shadow-card border border-border-light dark:border-border-dark ${hasToggle ? 'cursor-pointer select-none' : ''} ${opacityClass}" id="card-${cssId(eid)}">
     <div class="flex items-center gap-3">
       <div class="w-10 h-10 rounded-xl ${color.bg} flex items-center justify-center flex-shrink-0">
         <span aria-hidden="true" class="material-symbols-outlined ${color.text}" id="icon-${cssId(eid)}">${icon}</span>
@@ -406,6 +372,16 @@ function buildCard(eid, state) {
     </div>
     ${controls}
   </div>`;
+}
+
+function displayName(eid, state) {
+  const override = entityMeta[eid]?.display_name;
+  if (override) return override;
+  return state?.attributes?.friendly_name || eid;
+}
+
+function entityOption(eid, key) {
+  return Boolean(entityMeta[eid]?.options?.[key]);
 }
 
 function formatState(domain, stateStr, state) {
@@ -427,6 +403,12 @@ function formatState(domain, stateStr, state) {
     if (stateStr === 'on' && pct != null) return `On · ${pct}%`;
     return esc(stateStr === 'on' ? 'On' : stateStr === 'off' ? 'Off' : stateStr);
   }
+  // "recording" vs "streaming" only reflects what Frigate is doing with the feed
+  // and is not something the viewer can act on, so it is hidden. An unavailable
+  // camera still says so, because that one matters.
+  if (domain === 'camera') {
+    return (stateStr === 'unavailable' || stateStr === 'unknown') ? esc(stateStr) : '';
+  }
   if (domain === 'sensor') {
     const unit = state.attributes?.unit_of_measurement;
     return unit ? `${esc(stateStr)} ${esc(unit)}` : esc(stateStr);
@@ -440,14 +422,55 @@ function formatState(domain, stateStr, state) {
 }
 
 function isDimmedState(domain, stateStr) {
-  if (domain === 'sensor' || domain === 'binary_sensor') {
+  if (domain === 'sensor' || domain === 'binary_sensor' || domain === 'camera') {
     return stateStr === 'unavailable' || stateStr === 'unknown';
   }
   return stateStr === 'off' || stateStr === 'unavailable' || stateStr === 'unknown';
 }
 
+function buildCameraControls(eid, state) {
+  if (state.state === 'unavailable' || state.state === 'unknown') return '';
+  const id = cssId(eid);
+  return `<div class="mt-3">
+    <div class="relative rounded-xl overflow-hidden bg-soot/5 dark:bg-white/5" style="aspect-ratio:16/9">
+      <img id="cam-${id}" data-eid="${esc(eid)}" alt="${esc(displayName(eid, state))}"
+           class="w-full h-full object-cover" src="${cameraStreamUrl(eid)}">
+    </div>
+  </div>`;
+}
+
+function cameraStreamUrl(eid) {
+  // Cache-busted so re-attaching after a hidden tab opens a fresh response
+  // rather than reusing the aborted one.
+  return `/g/${SLUG}/camera/${encodeURIComponent(eid)}/stream?t=${Date.now()}`;
+}
+
+// Cameras stream for as long as the page is open. A backgrounded tab would
+// otherwise keep one upstream connection per camera pinned open for hours, so
+// streams are dropped on hide and re-attached on show. Clearing src is what
+// actually closes the MJPEG response; removing the element alone does not.
+function detachCameraStreams() {
+  document.querySelectorAll('img[id^="cam-"]').forEach(img => { img.src = ''; });
+}
+
+function attachCameraStreams() {
+  document.querySelectorAll('img[id^="cam-"]').forEach(img => {
+    const eid = img.dataset.eid;
+    if (eid && !img.getAttribute('src')) img.src = cameraStreamUrl(eid);
+  });
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') detachCameraStreams();
+  else attachCameraStreams();
+});
+
+window.addEventListener('pagehide', detachCameraStreams);
+
 function buildLightControls(eid, state) {
   if (state.state !== 'on') return '';
+  // Opt-in: no slider unless this token explicitly enabled it for this entity.
+  if (!entityOption(eid, 'show_brightness')) return '';
   const brightness = Number(state.attributes?.brightness) || 255;
   const pct = Math.round((brightness / 255) * 100);
   return `<div data-slider-section class="mt-3 flex items-center gap-3">
@@ -898,6 +921,19 @@ document.addEventListener('click', e => {
       el.classList.toggle('on');
       el.setAttribute('aria-checked', String(el.classList.contains('on')));
       break;
+    case 'card-toggle': {
+      // A nested element carrying its own data-action already wins via
+      // closest(), but the brightness slider uses data-range-action and would
+      // otherwise toggle the light off mid-drag. Same for any raw control.
+      if (e.target.closest('[data-range-action], input, button, a, img')) break;
+      sendToggle(eid, el.dataset.domain);
+      const track = el.querySelector('.toggle-track');
+      if (track) {
+        track.classList.toggle('on');
+        track.setAttribute('aria-checked', String(track.classList.contains('on')));
+      }
+      break;
+    }
     case 'adjust-temp':
       adjustTemp(eid, parseFloat(el.dataset.delta));
       break;
@@ -930,6 +966,9 @@ document.addEventListener('click', e => {
 
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
+  // Space on a focused range/button/link belongs to that control, not to the
+  // card-toggle wrapper it happens to sit inside.
+  if (e.target.matches('input, button, a, [data-range-action]')) return;
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'BUTTON') return; // buttons handle Enter natively
   e.preventDefault();

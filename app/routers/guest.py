@@ -5,6 +5,7 @@
 # dashboard uses SameSite=strict cookies for CSRF protection.
 import asyncio
 import ipaddress
+from contextlib import AsyncExitStack
 import json
 import logging
 import re
@@ -13,7 +14,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Path, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from app import database as db
@@ -37,6 +38,25 @@ SSE_KEEPALIVE_SECONDS = 25
 # Global rate limit for guest command proxy (requests per minute per token).
 # Hardcoded — no comparable self-hosted app exposes per-user rate limits.
 COMMAND_RPM = 30
+
+# Camera stills are cheap and the UI refreshes thumbnails on a timer, so they get
+# their own, looser budget under a separate limiter key — a guest watching a camera
+# must not burn the command allowance that controls their lights.
+CAMERA_SNAPSHOT_RPM = 120
+
+# Each live MJPEG view holds one upstream connection to HA open for its whole
+# lifetime, so this is capped per token rather than rate-limited per minute.
+# Cameras stream for as long as the guest page is open, so the real consumption
+# is (cameras on the token) x (open tabs) — 2 would be exhausted by a single
+# 2-camera page and 429 the guest's second device.
+MAX_STREAMS_PER_TOKEN = 8
+_active_streams: dict[str, int] = {}
+_stream_lock = asyncio.Lock()
+
+# entity_id arrives in a URL path here (it does not anywhere else in this app) and
+# is interpolated into the upstream HA request, so it is matched against an exact
+# shape rather than merely checked for membership.
+_CAMERA_ENTITY_RE = re.compile(r"^camera\.[a-z0-9_]+$")
 
 # L-8: Whitelist of allowed SSE event types
 _ALLOWED_SSE_EVENTS = {"state_change", "token_expired", "reconnected"}
@@ -262,7 +282,10 @@ async def guest_state(request: Request, slug: str = Path(max_length=64)):
         if eid not in states:
             states[eid] = {"entity_id": eid, "state": "unavailable", "attributes": {}}
 
-    return {"entities": entity_ids, "states": states}
+    # Presentation overrides ride alongside the states rather than being merged
+    # into them, so the raw HA attributes the UI reads stay untouched.
+    meta = await db.get_token_entity_meta(row["id"])
+    return {"entities": entity_ids, "states": states, "entity_meta": meta}
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +327,105 @@ async def guest_stream(request: Request, slug: str = Path(max_length=64)):
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Camera proxy
+# ---------------------------------------------------------------------------
+# Guests never receive an HA URL or the HA token. Every frame is relayed through
+# these endpoints after the same token + allowlist checks the command path uses.
+
+async def _validate_camera(slug: str, entity_id: str, request: Request):
+    """Shared gate for both camera endpoints. Order matters: token, shape, allowlist."""
+    row = await _validate_token(slug, request)
+
+    if not _CAMERA_ENTITY_RE.match(entity_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Invalid camera entity",
+        )
+
+    entity_ids = await db.get_token_entities(row["id"])
+    if entity_id not in entity_ids:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Entity not in allowlist")
+
+    return row
+
+
+@router.get("/{slug}/camera/{entity_id}")
+async def guest_camera_snapshot(
+    request: Request,
+    slug: str = Path(max_length=64),
+    entity_id: str = Path(max_length=255),
+):
+    row = await _validate_camera(slug, entity_id, request)
+
+    if not await rate_limiter.check(f"cam:{row['id']}", CAMERA_SNAPSHOT_RPM):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+
+    try:
+        data, ctype = await ha_client.camera_snapshot(entity_id)
+    except Exception:
+        logger.warning("Camera snapshot failed for %s", entity_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Camera unavailable")
+
+    return Response(content=data, media_type=ctype, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/{slug}/camera/{entity_id}/stream")
+async def guest_camera_stream(
+    request: Request,
+    slug: str = Path(max_length=64),
+    entity_id: str = Path(max_length=255),
+):
+    row = await _validate_camera(slug, entity_id, request)
+    token_id = row["id"]
+
+    async with _stream_lock:
+        if _active_streams.get(token_id, 0) >= MAX_STREAMS_PER_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many concurrent streams",
+            )
+        _active_streams[token_id] = _active_streams.get(token_id, 0) + 1
+
+    async def _release() -> None:
+        async with _stream_lock:
+            remaining = _active_streams.get(token_id, 1) - 1
+            if remaining > 0:
+                _active_streams[token_id] = remaining
+            else:
+                _active_streams.pop(token_id, None)
+
+    # The upstream is opened here rather than inside the generator so the real
+    # boundary from HA's Content-Type reaches the browser, and so an upstream
+    # failure surfaces as 502 instead of a truncated 200.
+    stack = AsyncExitStack()
+    try:
+        ctype, chunks = await stack.enter_async_context(ha_client.camera_stream(entity_id))
+    except Exception:
+        await stack.aclose()
+        await _release()
+        logger.warning("Camera stream failed to open for %s", entity_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Camera unavailable")
+
+    async def _relay() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in chunks:
+                if await request.is_disconnected():
+                    break
+                yield chunk
+        except Exception:
+            logger.info("Camera stream ended for %s", entity_id)
+        finally:
+            await stack.aclose()
+            await _release()
+
+    return StreamingResponse(
+        _relay(),
+        media_type=ctype,
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
 
 

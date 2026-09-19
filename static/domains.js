@@ -1,17 +1,18 @@
 // Shared domain configuration — single source of truth for guest + admin UIs.
 // To add a new HA entity domain, edit only this file.
-const DOMAIN_ORDER = ['light','switch','input_boolean','climate','lock','media_player','cover','fan','sensor','binary_sensor'];
+const DOMAIN_ORDER = ['camera','light','switch','input_boolean','climate','lock','media_player','cover','fan','sensor','binary_sensor'];
 const DOMAIN_LABELS = {
-  light: 'Lights', switch: 'Switches', input_boolean: 'Switches', climate: 'Climate',
+  camera: 'Cameras', light: 'Lights', switch: 'Switches', input_boolean: 'Switches', climate: 'Climate',
   lock: 'Locks', media_player: 'Media', cover: 'Covers', fan: 'Fans',
   sensor: 'Sensors', binary_sensor: 'Binary Sensors',
 };
 const DOMAIN_ICONS = {
-  light: 'lightbulb', switch: 'toggle_on', input_boolean: 'toggle_on', climate: 'thermostat',
+  camera: 'videocam', light: 'lightbulb', switch: 'toggle_on', input_boolean: 'toggle_on', climate: 'thermostat',
   lock: 'lock', media_player: 'speaker', cover: 'blinds', fan: 'mode_fan',
   sensor: 'sensors', binary_sensor: 'motion_sensor_active',
 };
 const DOMAIN_COLORS = {
+  camera: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', icon: 'bg-indigo-500' },
   light: { bg: 'bg-amber-500/10', text: 'text-amber-500', icon: 'bg-amber-500' },
   switch: { bg: 'bg-teal-600/10', text: 'text-teal-600', icon: 'bg-teal-600' },
   input_boolean: { bg: 'bg-teal-600/10', text: 'text-teal-600', icon: 'bg-teal-600' },
