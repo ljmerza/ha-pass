@@ -664,7 +664,11 @@ async function loadEntities() {
 }
 
 // ── Entity Picker Component ───────────────────────────────────────────
-const PICKER_DOMAINS = ['all', 'light', 'switch', 'climate', 'lock', 'media_player', 'cover', 'fan', 'sensor', 'binary_sensor'];
+// Derived from DOMAIN_ORDER so a domain added in domains.js gets a chip
+// automatically - camera was missing because this list was maintained by hand.
+// input_boolean is excluded on purpose: it shares the "Switches" label with
+// switch, so including it renders two identical chips.
+const PICKER_DOMAINS = ['all', ...DOMAIN_ORDER.filter(d => d !== 'input_boolean')];
 const PICKER_ICONS = { all: 'apps', ...DOMAIN_ICONS };
 
 // What the entity is called in this picker: the per-token override if one is
