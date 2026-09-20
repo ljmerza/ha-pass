@@ -447,3 +447,231 @@ async def stop_ws_listener() -> None:
         except asyncio.CancelledError:
             pass
         _ws_task = None
+
+
+# ---------------------------------------------------------------------------
+# WebSocket request/response — one throwaway connection per command
+# ---------------------------------------------------------------------------
+# The listener above is a one-way subscription: it owns its recv order and every
+# guest's live updates ride on it. Rather than thread a pending-futures map
+# through that state machine, a command opens its own connection, authenticates,
+# asks, reads the reply and closes. The SSE fan-out is untouched, the failure
+# modes are local to the caller, and the extra connect only happens on a cache
+# miss.
+WS_COMMAND_TIMEOUT = 10
+
+
+class WSCommandError(Exception):
+    """A WS command that did not come back successfully.
+
+    `code` is Home Assistant's own error code when it sent one ("unauthorized",
+    "unknown_command", …), or one of the local codes below when the failure
+    happened before HA could answer.
+    """
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Local stand-ins for the codes HA never gets to send
+WS_CODE_AUTH_FAILED = "auth_failed"
+WS_CODE_TIMEOUT = "timeout"
+WS_CODE_CONNECTION = "connection"
+
+
+async def ws_command(command: dict) -> Any:
+    """Send one command over a short-lived WS connection, return its result.
+
+    Raises WSCommandError for every failure — auth refused, `success: false`,
+    timeout, or the connection dropping before the reply arrives. Callers decide
+    what a failure means; nothing here retries.
+    """
+    ws_url = _build_ws_url()
+    msg_id = 1
+    try:
+        async with asyncio.timeout(WS_COMMAND_TIMEOUT):
+            # ping_interval is off: the connection lives for one round trip, so
+            # the keepalive would never fire and only risks racing the close.
+            async with websockets.connect(ws_url, ping_interval=None) as ws:
+                msg = json.loads(await ws.recv())
+                if msg.get("type") != "auth_required":
+                    raise WSCommandError(
+                        f"Unexpected WS greeting: {msg.get('type')}", WS_CODE_CONNECTION
+                    )
+
+                await ws.send(json.dumps({"type": "auth", "access_token": settings.ha_token}))
+                msg = json.loads(await ws.recv())
+                if msg.get("type") != "auth_ok":
+                    raise WSCommandError(
+                        f"HA WebSocket auth failed: {msg.get('message') or msg.get('type')}",
+                        WS_CODE_AUTH_FAILED,
+                    )
+
+                await ws.send(json.dumps({"id": msg_id, **command}))
+                # HA may interleave other messages; take the first result for us.
+                async for raw in ws:
+                    try:
+                        reply = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if reply.get("type") == "result" and reply.get("id") == msg_id:
+                        break
+                else:
+                    raise WSCommandError(
+                        "HA closed the WebSocket before answering", WS_CODE_CONNECTION
+                    )
+
+                if not reply.get("success"):
+                    error = reply.get("error") or {}
+                    raise WSCommandError(
+                        error.get("message") or "HA refused the command",
+                        error.get("code"),
+                    )
+                return reply.get("result")
+    except TimeoutError as exc:
+        raise WSCommandError(
+            f"HA did not answer {command.get('type')} within {WS_COMMAND_TIMEOUT}s",
+            WS_CODE_TIMEOUT,
+        ) from exc
+    except (websockets.exceptions.WebSocketException, OSError) as exc:
+        raise WSCommandError(f"HA WebSocket error: {exc}", WS_CODE_CONNECTION) from exc
+
+
+# ---------------------------------------------------------------------------
+# Entity + label registries — the only source of HA labels
+# ---------------------------------------------------------------------------
+# REST /api/states carries state and attributes, not registry data, so labels
+# are only reachable over the WS API. Verified against HA core (dev):
+# `config/entity_registry/list` returns EntityRegistryEntry.as_partial_dict,
+# which includes "entity_id" and "labels" (a list of label ids), and
+# `config/label_registry/list` returns {"label_id", "name", "color", "icon",
+# "description", …}. Neither carries @require_admin — only the create/update/
+# remove variants do — so the non-admin long-lived tokens that cannot POST
+# /api/events/ (see app/routers/guest.py) can still read labels.
+#
+# HA can still refuse or not offer them (a core old enough to predate the label
+# registry answers "unknown_command"), and the picker has to work either way, so
+# every failure here degrades to "labels unavailable" instead of propagating.
+#
+# Labels are edited by hand in the HA UI, so they change on human timescales. A
+# 10-minute TTL means a newly created label shows up in the picker on its own
+# within one coffee break, while a burst of modal opens costs one registry read.
+REGISTRY_CACHE_TTL = 600
+
+# A refusal is permanent for this token, exactly like the activity-event refusal
+# in app/routers/guest.py — same latch, same hourly re-probe so fixing HA takes
+# effect without a restart, same "explain it once" rule.
+REGISTRY_DENIED_RETRY_SECONDS = 3600
+
+# error code -> the one message an admin gets when it latches
+_REGISTRY_DENIED_HELP = {
+    "unauthorized": (
+        "Home Assistant refused to list its entity/label registry and will refuse "
+        "every later read: the user behind HA_TOKEN is not permitted to read it. "
+        "HAPass has stopped asking, so the admin entity picker has no label filter. "
+        "Everything else — the entity list itself, guest access, tokens — is "
+        "unaffected. Fix the token's permissions and HAPass picks labels back up "
+        "within an hour, no restart needed."
+    ),
+    "unknown_command": (
+        "Home Assistant does not offer config/entity_registry/list or "
+        "config/label_registry/list, so HAPass cannot read labels and the admin "
+        "entity picker has no label filter. Nothing else is affected. This usually "
+        "means a Home Assistant too old to have the label registry."
+    ),
+    WS_CODE_AUTH_FAILED: (
+        "Home Assistant rejected HA_TOKEN on the WebSocket API, so HAPass cannot "
+        "read labels and the admin entity picker has no label filter. Replace "
+        "HA_TOKEN with a valid long-lived access token."
+    ),
+}
+
+_registry_cache: dict[str, Any] | None = None
+_registry_cache_ts: float = 0.0
+# time.monotonic() of the refusal that latched label reads off
+_registry_denied_at: float | None = None
+
+
+def _registry_reads_open() -> bool:
+    """False while registry reads are latched off by a refusal already explained."""
+    if _registry_denied_at is None:
+        return True
+    return (time.monotonic() - _registry_denied_at) >= REGISTRY_DENIED_RETRY_SECONDS
+
+
+def _note_registry_failure(exc: WSCommandError) -> None:
+    """Log one registry-read failure, latching the permanent ones."""
+    global _registry_denied_at
+    help_message = _REGISTRY_DENIED_HELP.get(exc.code or "")
+    if help_message:
+        # Only the move into refused is logged; a re-probe that comes back
+        # refused again tells the admin nothing new.
+        first_refusal = _registry_denied_at is None
+        _registry_denied_at = time.monotonic()
+        if first_refusal:
+            logger.error(help_message)
+        return
+    logger.warning("Could not read the HA entity/label registry: %s", exc)
+
+
+def _note_registry_success() -> None:
+    """Unlatch reads HA has started answering again."""
+    global _registry_denied_at
+    if _registry_denied_at is not None:
+        _registry_denied_at = None
+        logger.info("Home Assistant is answering HAPass registry reads again.")
+
+
+async def get_label_registry() -> dict[str, Any] | None:
+    """Return the label catalogue plus entity -> label ids, or None.
+
+    None means "labels cannot be read" — refused, unsupported, or HA unreachable.
+    Callers must treat it as "this deployment has no label filter", never as
+    "no entity has labels". Only successful reads are cached.
+    """
+    global _registry_cache, _registry_cache_ts
+    now = time.monotonic()
+    if _registry_cache is not None and (now - _registry_cache_ts) < REGISTRY_CACHE_TTL:
+        return _registry_cache
+    if not _registry_reads_open():
+        return None
+
+    try:
+        labels = await ws_command({"type": "config/label_registry/list"})
+        entries = await ws_command({"type": "config/entity_registry/list"})
+    except WSCommandError as exc:
+        _note_registry_failure(exc)
+        return None
+    except Exception as exc:  # malformed payload, anything unforeseen
+        logger.warning("Could not read the HA entity/label registry: %s", exc)
+        return None
+
+    try:
+        catalogue = sorted(
+            (
+                {
+                    "label_id": label["label_id"],
+                    "name": label.get("name") or label["label_id"],
+                    "color": label.get("color"),
+                    "icon": label.get("icon"),
+                }
+                for label in labels or []
+            ),
+            key=lambda label: label["name"].casefold(),
+        )
+        # Only entities that actually carry a label get an entry, so the payload
+        # stays proportional to label use rather than to registry size.
+        entity_labels = {
+            entry["entity_id"]: list(entry["labels"])
+            for entry in entries or []
+            if entry.get("labels")
+        }
+    except (KeyError, TypeError) as exc:
+        logger.warning("HA registry reply was not in the expected shape: %s", exc)
+        return None
+
+    _note_registry_success()
+    _registry_cache = {"labels": catalogue, "entity_labels": entity_labels}
+    _registry_cache_ts = now
+    return _registry_cache

@@ -88,6 +88,11 @@ def mock_ha_client():
         "camera_snapshot": AsyncMock(return_value=(b"\xff\xd8fake-jpeg", "image/jpeg")),
         "camera_stream": _fake_camera_stream,
         "get_home_zone": AsyncMock(return_value=dict(HOME_ZONE)),
+        # None is "labels cannot be read" — the degraded default, so a test that
+        # does not care about labels never reaches the real WS command. Tests
+        # that do care set a return value of
+        # {"labels": [...], "entity_labels": {...}}.
+        "get_label_registry": AsyncMock(return_value=None),
     }
     with patch.multiple("app.ha_client", **mocks):
         yield mocks
@@ -127,6 +132,20 @@ def _reset_activity_latch():
     """
     from app.routers.guest import _activity_denied
     _activity_denied.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_registry_cache():
+    """Clear the HA label-registry cache and its refusal latch between tests.
+
+    Same module-level singleton problem as the latch above: a cached registry
+    read would be served to the next test, and a refusal would leave label reads
+    latched off for every test after it.
+    """
+    from app import ha_client
+    ha_client._registry_cache = None
+    ha_client._registry_cache_ts = 0.0
+    ha_client._registry_denied_at = None
 
 
 @pytest_asyncio.fixture

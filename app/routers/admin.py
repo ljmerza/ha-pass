@@ -1,4 +1,5 @@
 """Admin API router."""
+import asyncio
 import ipaddress
 import json
 import secrets
@@ -381,13 +382,43 @@ async def delete_token(token_id: str, _: str = Depends(require_admin)) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/ha/entities")
-async def ha_entities(_: str = Depends(require_admin)) -> list[dict]:
-    try:
-        states = await ha_client.get_states()
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Home Assistant unreachable")
+async def ha_entities(
+    include_labels: bool = False,
+    _: str = Depends(require_admin),
+) -> Any:
+    """List the entities guests may be given, optionally with HA labels.
+
+    Without include_labels the response is the bare entity list it has always
+    been, and no registry read happens. With it, the response becomes an
+    envelope carrying the same list (each entity gaining `labels`) plus the
+    label catalogue, so the picker gets both halves of a label filter in one
+    round trip. Labels come from HA's registries over the WebSocket API; when
+    those cannot be read the envelope still arrives, with labels_available
+    false and every label list empty, and the picker hides its filter.
+    """
+    if include_labels:
+        # The registry read is independent of /api/states, so overlap them —
+        # an unreachable or slow registry must not add to how long the picker
+        # waits for its entities.
+        states, registry = await asyncio.gather(
+            ha_client.get_states(),
+            ha_client.get_label_registry(),
+            return_exceptions=True,
+        )
+        if isinstance(states, BaseException):
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Home Assistant unreachable")
+        if isinstance(registry, BaseException):
+            registry = None
+    else:
+        registry = None
+        try:
+            states = await ha_client.get_states()
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Home Assistant unreachable")
+
     # Only return entities whose domain guests can either control or view.
-    return [
+    entity_labels = (registry or {}).get("entity_labels", {})
+    entities = [
         {
             "entity_id": s["entity_id"],
             "friendly_name": s.get("attributes", {}).get("friendly_name", s["entity_id"]),
@@ -397,3 +428,13 @@ async def ha_entities(_: str = Depends(require_admin)) -> list[dict]:
         for s in states
         if (domain := s["entity_id"].split(".")[0]) in SUPPORTED_DOMAINS
     ]
+    if not include_labels:
+        return entities
+
+    for entity in entities:
+        entity["labels"] = entity_labels.get(entity["entity_id"], [])
+    return {
+        "entities": entities,
+        "labels": (registry or {}).get("labels", []),
+        "labels_available": registry is not None,
+    }
