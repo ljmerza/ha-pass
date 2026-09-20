@@ -1,0 +1,17 @@
+name: Cleanup PR image
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    name: Delete pr-${{ github.event.pull_request.number }} from GHCR
+    permissions:
+      contents: read
+      packages: write
+    uses: ljmerza/misc-actions/.github/workflows/cleanup-pr-image.yml@v2.4.3
+    with:
+      # github.event.repository.name, not a literal, so a repo rename needs no edit.
+      package-name: ${{ github.event.repository.name }}
+    secrets: inherit

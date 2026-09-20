@@ -1,99 +1,121 @@
-name: Build & Push Docker Image
+name: Release
 
 on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
-  pull_request:
-    branches: [main]
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # When a version tag is pushed, update config.yaml to match and commit to main.
-  # This keeps the HA add-on version in sync with the Docker image tag.
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ljmerza/misc-actions/actions/python-test@v2.4.3
+        with:
+          python-version: "3.12"
+          requirements-file: requirements-dev.txt
+
+  # A v1.2.3 tag must become `version: "1.2.3"` in config.yaml on main, because
+  # the Home Assistant supervisor pulls <image>:<version> from that field.
+  # There is no shared action for this; it is add-on specific.
   sync-addon-version:
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Sync add-on version
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Serialise across tags so two releases cannot both push to main.
+    concurrency:
+      group: sync-addon-version
+      cancel-in-progress: false
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: main
+          persist-credentials: true
 
-      - name: Update config.yaml version from tag
+      - name: Bump config.yaml to match the tag
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version: .*/version: \"${VERSION}\"/" config.yaml
-          echo "Version set to ${VERSION}"
-
-      - name: Commit and push if changed
-        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add config.yaml
-          git diff --cached --quiet && echo "Already up to date" && exit 0
-          git commit -m "Bump add-on version to ${GITHUB_REF_NAME#v}"
-          git push
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Each attempt re-derives the edit from the current tip of main, so a
+          # concurrent push to main is a plain retry rather than a rebase that
+          # can conflict.
+          for attempt in 1 2 3; do
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            sed -i "s/^version: .*/version: \"${VERSION}\"/" config.yaml
+
+            if git diff --quiet -- config.yaml; then
+              echo "config.yaml is already at ${VERSION}"
+              exit 0
+            fi
+
+            git commit --quiet -m "Bump add-on version to ${VERSION}" -- config.yaml
+            if git push origin HEAD:main; then
+              echo "Pushed version ${VERSION} to main"
+              exit 0
+            fi
+            echo "push rejected (attempt ${attempt}/3), retrying against the new tip"
+          done
+
+          echo "::error::could not push the ${VERSION} bump to main after 3 attempts"
+          exit 1
 
   build:
+    name: Build and push image
+    needs: tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+      attestations: write
+      id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Set up QEMU (multi-arch)
-        uses: docker/setup-qemu-action@v3
+      # The tag ref still carries the pre-bump version; sync-addon-version only
+      # fixes main. Stamp it here so the build context matches the tag.
+      - name: Stamp the tag version into config.yaml
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^version: .*/version: \"${TAG#v}\"/" config.yaml
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+      # Not the reusable docker-release.yml: it tags releases `type=ref,event=tag`,
+      # which would publish `:v1.2.3`. The HA supervisor pulls `<image>:<version>`
+      # with no `v`, so the bare semver tag below is required.
+      - uses: ljmerza/misc-actions/actions/docker-build-push@v2.4.3
+        id: build
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          image-name: ghcr.io/${{ github.repository }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
-            # Push to main → :dev
-            type=raw,value=dev,enable={{is_default_branch}}
-            # Tag v1.2.3 → :1.2.3, :1.2, :1, :latest
+            type=raw,value=main,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            # SHA for traceability
-            type=sha,prefix=
+            type=sha,prefix=sha-
 
-      - name: Stamp config.yaml version in build context
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version: .*/version: \"${VERSION}\"/" config.yaml
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - uses: ljmerza/misc-actions/actions/provenance-attest@v2.4.3
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          image-name: ghcr.io/${{ github.repository }}
+          digest: ${{ steps.build.outputs.digest }}

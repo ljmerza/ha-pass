@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # The reusable python-tests.yml is not usable here: it hard-requires a
+      # coverage-source, always runs ruff (this project has no ruff config), and
+      # gives no way to install from requirements files. The composite action
+      # underneath does, via requirements-file.
+      - uses: ljmerza/misc-actions/actions/python-test@v2.4.3
+        with:
+          python-version: "3.12"
+          requirements-file: requirements-dev.txt
+          # No coverage-source: pytest-cov is not a dependency of this project
+          # and there is no Codecov token, so coverage would upload nowhere.
+          # tests/conftest.py sets ADMIN_USERNAME/ADMIN_PASSWORD/HA_BASE_URL/
+          # HA_TOKEN itself at import time, so no env-vars are needed either.
+
+  build:
+    name: Build image
+    needs: tests
+    permissions:
+      contents: read
+      packages: write
+    uses: ljmerza/misc-actions/.github/workflows/docker-ci.yml@v2.4.3
+    with:
+      image-name: ghcr.io/${{ github.repository }}
+      # The Dockerfile declares ARG GIT_SHA (used to stamp the service-worker
+      # cache key). None of the auto-injected args match that name.
+      build-args: |
+        GIT_SHA=${{ github.sha }}
+    secrets: inherit
