@@ -9,6 +9,40 @@ HomePass is a fork of [Rohithkadaveru/ha-pass](https://github.com/Rohithkadaveru
 unmaintained upstream since April 2026. Releases up to and including 0.2.4 are
 upstream's; 0.3.0 is the first release from this fork.
 
+## [1.0.1] - 2026-09-20
+
+### Fixed
+
+- **The guest service worker never controlled anything.** It was registered as
+  `/static/sw.js`, and a worker's scope defaults to its own directory, so its
+  scope was `/static/` — which does not cover the guest pages at `/g/<slug>`.
+  No page was ever controlled, the fetch handler never ran, and the offline PWA
+  shell has been inert since it was added. The worker is now served from
+  `/g/sw.js` with scope `/g/`. It stays unregistered under Home Assistant
+  ingress, as before. A guest who already has the old registration keeps it as
+  an inert phantom entry; nothing needs clearing by hand.
+- **Static assets could be served stale after an upgrade.** `dist.css`, the JS
+  files and the PWA manifest's icon URLs carried no version, and the app sends
+  no `Cache-Control` header, so browsers applied heuristic freshness and could
+  keep an old copy without revalidating. Every static URL now carries a
+  `?v=<build>` that changes with the build. The service worker's cache lookup
+  ignores the query string, so the install-time precache still matches rather
+  than silently falling through to the network on every load.
+
+### Added
+
+- `icon.png` and `logo.png` for the Home Assistant add-on store, plus this
+  changelog, which Supervisor renders on the add-on page.
+
+### Documentation
+
+- `README.md` and `DOCS.md` now describe what the project actually does. The
+  rate limit was documented as "30 req/min per token", a figure matching no
+  constant in the codebase; the real limits are a 300/min burst plus a
+  3000/hour sustained cap on commands. Controllable domains went from 8
+  documented to 20, read-only from 2 to 4 (`camera` and `schedule` were
+  undocumented), and the `PORT` environment variable was missing entirely.
+
 ## [1.0.0] - 2026-09-20
 
 First release under the **HomePass** name.
