@@ -78,7 +78,8 @@ def _house_pixels(size: int, bg_opaque: bool = False):
     return rows
 
 
-def _encode_png(size: int, rows: list[bytes]) -> bytes:
+def encode_rgba_png(width: int, height: int, rows: list[bytes]) -> bytes:
+    """Encode filter-byte-prefixed RGBA rows as a PNG (non-square allowed)."""
     raw = b"".join(rows)
     idat = zlib.compress(raw)
 
@@ -87,7 +88,7 @@ def _encode_png(size: int, rows: list[bytes]) -> bytes:
         return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
 
     # Color type 6 = RGBA, bit depth 8
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
 
     return (
         b"\x89PNG\r\n\x1a\n"
@@ -95,6 +96,10 @@ def _encode_png(size: int, rows: list[bytes]) -> bytes:
         + chunk(b"IDAT", idat)
         + chunk(b"IEND", b"")
     )
+
+
+def _encode_png(size: int, rows: list[bytes]) -> bytes:
+    return encode_rgba_png(size, size, rows)
 
 
 def make_house_png(size: int) -> bytes:
