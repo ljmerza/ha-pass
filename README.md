@@ -87,7 +87,7 @@ docker run -d --restart unless-stopped \
 
 The admin dashboard is at `http://localhost:5880/admin/dashboard`.
 
-> **Note:** Docker deployments need a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token) from Home Assistant. Create one in your HA profile under **Security → Long-Lived Access Tokens**. The add-on handles this automatically.
+> **Note:** Docker deployments need a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token) from Home Assistant. Create one in your HA profile under **Security → Long-Lived Access Tokens**, from a user with **Administrator** enabled — Home Assistant only lets admins POST to `/api/events/`, so a non-admin token runs guest commands fine but cannot fire HAPass's activity events. The add-on handles this automatically.
 
 ## Configuration
 

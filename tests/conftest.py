@@ -117,6 +117,18 @@ def _reset_guest_limiter():
     rate_limiter._windows.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_activity_latch():
+    """Clear the HA activity-reporting latch between tests.
+
+    Same module-level singleton problem as the limiters above: a test that makes
+    HA refuse an activity event would otherwise leave that channel latched off
+    for every test that runs after it.
+    """
+    from app.routers.guest import _activity_denied
+    _activity_denied.clear()
+
+
 @pytest_asyncio.fixture
 async def client(test_db, mock_ha_client):
     """httpx.AsyncClient using ASGITransport — bypasses lifespan.

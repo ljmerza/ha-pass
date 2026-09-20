@@ -7,6 +7,7 @@ These are integration tests. The full request path is exercised:
 
 Only ha_client is mocked — it's an external dependency we can't run in CI.
 """
+import logging
 import time
 
 import httpx
@@ -101,6 +102,135 @@ async def test_logbook_failure_does_not_break_command(client, sample_token, mock
     assert resp.status_code == 200
     mock_ha_client["fire_event"].assert_called_once()
     mock_ha_client["logbook_log"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Activity reporting when HA refuses it — upstream issue #19
+# ---------------------------------------------------------------------------
+# POST /api/events/ is admin-only in HA while POST /api/services/ is not, so a
+# standalone install holding a non-admin long-lived token runs commands fine and
+# gets a 401 only on the event.
+
+def _ha_refusal(status_code: int, path: str) -> httpx.HTTPStatusError:
+    """The HTTPStatusError httpx raises for a refused HA POST."""
+    request = httpx.Request("POST", f"http://localhost:8123{path}")
+    return httpx.HTTPStatusError(
+        f"Client error '{status_code}' for url '{request.url}'",
+        request=request,
+        response=httpx.Response(status_code, request=request),
+    )
+
+
+async def test_event_401_does_not_break_command_or_access_log(client, sample_token, mock_ha_client):
+    """A non-admin token still runs the command, still gets logged, still logbooks."""
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={"entity_id": "light.living_room", "service": "turn_on"},
+    )
+    assert resp.status_code == 200
+    mock_ha_client["call_service"].assert_called_once()
+    # The logbook call goes out over /api/services/, which HA does not gate on
+    # admin, so it must not be latched off alongside the event.
+    mock_ha_client["logbook_log"].assert_called_once()
+
+    conn = await db.get_db()
+    async with conn.execute(
+        "SELECT * FROM access_log WHERE token_id = ?", (sample_token["id"],)
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row["event_type"] == "command"
+
+
+async def test_event_401_is_explained_once_and_then_latched(client, sample_token, mock_ha_client, caplog):
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    with caplog.at_level(logging.INFO, logger="app.routers.guest"):
+        for _ in range(3):
+            resp = await client.post(
+                f"/g/{sample_token['slug']}/command",
+                json={"entity_id": "light.living_room", "service": "turn_on"},
+            )
+            assert resp.status_code == 200
+
+    # Refused once, then skipped — not retried and re-warned per request.
+    assert mock_ha_client["fire_event"].call_count == 1
+    assert mock_ha_client["logbook_log"].call_count == 3
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    message = errors[0].getMessage()
+    assert "401" in message
+    assert "Administrator" in message
+    assert "/api/events/" in message
+    assert "Recent Activity" in message
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_logbook_403_latches_independently_of_the_event(client, sample_token, mock_ha_client, caplog):
+    mock_ha_client["logbook_log"].side_effect = _ha_refusal(403, "/api/services/logbook/log")
+    with caplog.at_level(logging.INFO, logger="app.routers.guest"):
+        for _ in range(2):
+            resp = await client.post(
+                f"/g/{sample_token['slug']}/command",
+                json={"entity_id": "light.living_room", "service": "turn_on"},
+            )
+            assert resp.status_code == 200
+
+    assert mock_ha_client["logbook_log"].call_count == 1
+    assert mock_ha_client["fire_event"].call_count == 2
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "logbook.log" in errors[0].getMessage()
+
+
+async def test_transient_event_failure_is_retried_not_latched(client, sample_token, mock_ha_client, caplog):
+    """A 502 is a blip, not a permission problem — keep trying, keep warning."""
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(502, "/api/events/ha_pass_activity")
+    with caplog.at_level(logging.INFO, logger="app.routers.guest"):
+        for _ in range(2):
+            resp = await client.post(
+                f"/g/{sample_token['slug']}/command",
+                json={"entity_id": "light.living_room", "service": "turn_on"},
+            )
+            assert resp.status_code == 200
+
+    assert mock_ha_client["fire_event"].call_count == 2
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+async def test_latched_event_channel_recovers_without_a_restart(client, sample_token, mock_ha_client, caplog):
+    import app.routers.guest as guest_mod
+
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={"entity_id": "light.living_room", "service": "turn_on"},
+    )
+    assert resp.status_code == 200
+    assert guest_mod._activity_denied["event"]
+
+    # Admin ticks Administrator on the user; the next re-probe picks it up.
+    guest_mod._activity_denied["event"] -= guest_mod.ACTIVITY_DENIED_RETRY_SECONDS + 1
+    mock_ha_client["fire_event"].side_effect = None
+    with caplog.at_level(logging.INFO, logger="app.routers.guest"):
+        resp = await client.post(
+            f"/g/{sample_token['slug']}/command",
+            json={"entity_id": "light.living_room", "service": "turn_on"},
+        )
+        assert resp.status_code == 200
+
+    assert mock_ha_client["fire_event"].call_count == 2
+    assert "event" not in guest_mod._activity_denied
+    assert any("accepting" in r.getMessage() for r in caplog.records)
+
+
+async def test_event_401_on_page_load_does_not_break_the_page(client, sample_token, mock_ha_client):
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    resp = await client.get(f"/g/{sample_token['slug']}")
+    assert resp.status_code == 200
+    assert mock_ha_client["logbook_log"].call_count == 1
 
 
 async def test_disallowed_service_never_reaches_ha(client, sample_token, mock_ha_client):

@@ -123,6 +123,57 @@ ACTIVITY_SCHEMA_VERSION = 1
 PAGE_LOAD_EVENT_DEBOUNCE_SECONDS = 30
 _page_load_activity_ts: dict[str, float] = {}
 
+# HA does not gate the two activity calls the same way. Firing an event is
+# POST /api/events/<type>, whose view carries @require_admin in HA core, while
+# the logbook entry goes out over POST /api/services/logbook/log, which has no
+# such decorator. A standalone deployment whose long-lived token belongs to a
+# non-admin HA user therefore runs every guest command and writes every logbook
+# entry, and is refused only the event. (Add-on installs authenticate with the
+# Supervisor token, so they never see it.)
+#
+# A refusal like that is permanent — the same token gets the same answer on
+# every request, so warning once per guest page load and per command is noise
+# and tells nobody how to fix it. A 401/403 latches its channel off after one
+# actionable message; a timeout or a 5xx is transient and keeps the per-request
+# warning, because the next request may well succeed.
+_ACTIVITY_DENIED_STATUSES = frozenset({401, 403})
+
+# A latched channel is re-probed this often, so fixing the token's permissions
+# takes effect on its own instead of needing a restart. That costs one refused
+# request an hour and stays quiet unless the answer changes.
+ACTIVITY_DENIED_RETRY_SECONDS = 3600
+
+# channel -> the one message an admin gets when it latches, given the status code
+_ACTIVITY_DENIED_HELP = {
+    "event": (
+        f"Home Assistant refused the {ACTIVITY_EVENT_TYPE} event with HTTP %d and "
+        "will refuse every later one: POST /api/events/ is admin-only, so HA_TOKEN "
+        "has to be a long-lived access token belonging to a Home Assistant user "
+        "with Administrator enabled. HAPass has stopped firing these events, so HA "
+        f"automations that trigger on {ACTIVITY_EVENT_TYPE} will not run. Guest "
+        "access, HAPass's own access log and the dashboard's Recent Activity are "
+        "unaffected. Give the token's user Administrator and HAPass picks the "
+        "events back up within an hour — no restart needed."
+    ),
+    "logbook": (
+        "Home Assistant refused the logbook.log service call with HTTP %d and will "
+        "refuse every later one: the user behind HA_TOKEN is not permitted to call "
+        "it. HAPass has stopped writing them, so guest activity will not appear in "
+        "the Home Assistant logbook. Guest access, HAPass's own access log and the "
+        "dashboard's Recent Activity are unaffected. Fix the token's permissions "
+        "and HAPass picks the entries back up within an hour — no restart needed."
+    ),
+}
+
+# channel -> the per-request warning a transient failure still gets
+_ACTIVITY_TRANSIENT_WARNING = {
+    "event": "Failed to emit HA activity event: %s",
+    "logbook": "Failed to write HA logbook activity: %s",
+}
+
+# channel -> time.monotonic() of the refusal that latched it
+_activity_denied: dict[str, float] = {}
+
 
 async def _get_cached_states() -> list[dict]:
     global _states_cache, _states_cache_ts
@@ -284,15 +335,48 @@ async def _enforce_proximity(row, body: CommandRequest) -> None:
         )
 
 
+def _activity_channel_open(channel: str) -> bool:
+    """False while a channel is latched off by a refusal already explained."""
+    denied_at = _activity_denied.get(channel)
+    if denied_at is None:
+        return True
+    return (time.monotonic() - denied_at) >= ACTIVITY_DENIED_RETRY_SECONDS
+
+
+def _note_activity_failure(channel: str, exc: Exception) -> None:
+    """Log one activity-reporting failure, latching the permanent ones."""
+    status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+    if status_code in _ACTIVITY_DENIED_STATUSES:
+        # Only the move into refused is logged. A re-probe that comes back
+        # refused again tells the admin nothing new, and logging it would turn
+        # the hourly retry into an hourly error.
+        first_refusal = channel not in _activity_denied
+        _activity_denied[channel] = time.monotonic()
+        if first_refusal:
+            logger.error(_ACTIVITY_DENIED_HELP[channel], status_code)
+        return
+    logger.warning(_ACTIVITY_TRANSIENT_WARNING[channel], exc)
+
+
+def _note_activity_success(channel: str) -> None:
+    """Unlatch a channel HA has started accepting again."""
+    if _activity_denied.pop(channel, None) is not None:
+        logger.info("Home Assistant is accepting HAPass %s activity again.", channel)
+
+
 async def _fire_activity_event(payload: dict) -> None:
-    try:
-        await ha_client.fire_event(ACTIVITY_EVENT_TYPE, payload)
-    except Exception as exc:
-        logger.warning("Failed to emit HA activity event: %s", exc)
-    try:
-        await ha_client.logbook_log(_logbook_payload(payload))
-    except Exception as exc:
-        logger.warning("Failed to write HA logbook activity: %s", exc)
+    if _activity_channel_open("event"):
+        try:
+            await ha_client.fire_event(ACTIVITY_EVENT_TYPE, payload)
+            _note_activity_success("event")
+        except Exception as exc:
+            _note_activity_failure("event", exc)
+    if _activity_channel_open("logbook"):
+        try:
+            await ha_client.logbook_log(_logbook_payload(payload))
+            _note_activity_success("logbook")
+        except Exception as exc:
+            _note_activity_failure("logbook", exc)
 
 
 def _logbook_payload(payload: dict) -> dict:
