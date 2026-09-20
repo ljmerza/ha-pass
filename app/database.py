@@ -96,6 +96,7 @@ async def create_token(
     expires_at: int,
     ip_allowlist: list[str] | None,
     entity_meta: dict[str, dict[str, Any]] | None = None,
+    pin_hash: str | None = None,
 ) -> dict[str, Any]:
     db = await get_db()
     token_id = str(uuid.uuid4())
@@ -109,9 +110,9 @@ async def create_token(
         await db.execute("BEGIN IMMEDIATE")
         await db.execute(
             """INSERT INTO tokens
-               (id, slug, label, created_at, expires_at, ip_allowlist)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (token_id, slug, label, now, expires_at, ip_json),
+               (id, slug, label, created_at, expires_at, ip_allowlist, pin_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (token_id, slug, label, now, expires_at, ip_json, pin_hash),
         )
         if entity_ids:
             meta = entity_meta or {}
@@ -248,6 +249,18 @@ async def update_token_entities(
     except Exception:
         await db.execute("ROLLBACK")
         raise
+
+
+async def set_token_pin(token_id: str, pin_hash: str | None) -> None:
+    """Set, replace, or (with None) clear a token's PIN.
+
+    Guest PIN sessions are signed with a key derived from this column, so a write
+    here is also the revocation mechanism — outstanding sessions stop verifying
+    with no session rows to delete.
+    """
+    db = await get_db()
+    await db.execute("UPDATE tokens SET pin_hash = ? WHERE id = ?", (pin_hash, token_id))
+    await db.commit()
 
 
 async def update_token_expiry(token_id: str, expires_at: int) -> None:

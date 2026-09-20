@@ -107,6 +107,18 @@ class TokenCreateRequest(BaseModel):
     expires_in_seconds: int = Field(..., gt=0)
     ip_allowlist: list[str] | None = None
     entity_meta: dict[str, dict[str, Any]] | None = None
+    # Deliberately unconstrained here and validated in the router instead: a
+    # Field(pattern=...) rejection becomes a 422 whose body echoes the offending
+    # `input` back, which for this one field would put the PIN in a response.
+    pin: str | None = None
+
+
+class TokenPinRequest(BaseModel):
+    """Set, replace, or clear a token's PIN. Null or blank clears it.
+
+    Unconstrained for the same reason as TokenCreateRequest.pin.
+    """
+    pin: str | None = None
 
 
 class TokenUpdateEntitiesRequest(BaseModel):

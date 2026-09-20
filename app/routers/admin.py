@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from app import database as db
 from app.auth import INGRESS_SENTINEL, SESSION_COOKIE, require_admin, verify_password
 from app.config import settings
+from app import guest_pin
 from app import ha_client
 from app.models import (
     AdminLoginRequest,
@@ -19,6 +20,7 @@ from app.models import (
     NEVER_EXPIRES_SECONDS,
     SUPPORTED_DOMAINS,
     TokenCreateRequest,
+    TokenPinRequest,
     TokenUpdateEntitiesRequest,
     TokenUpdateExpiryRequest,
 )
@@ -108,6 +110,9 @@ def _row_to_response(row: Any, entity_ids: list[str] | None = None,
         "entity_count": count,
         "entity_ids": entity_ids,
         "entity_meta": entity_meta,
+        # Whether, never what — the PIN is stored as a bcrypt hash and there is
+        # no path that returns it or the hash to the dashboard.
+        "has_pin": bool(row["pin_hash"]),
     }
 
 
@@ -175,9 +180,29 @@ async def create_token(
         expires_at=expires_at,
         ip_allowlist=body.ip_allowlist,
         entity_meta=_clean_entity_meta(body.entity_meta),
+        pin_hash=await _hash_pin_or_none(body.pin),
     )
     entity_ids = await db.get_token_entities(row["id"])
     return _row_to_response(row, entity_ids)
+
+
+async def _hash_pin_or_none(value: Any) -> str | None:
+    """Validate a submitted PIN and hash it. Blank or None means 'no PIN'.
+
+    The rejection message describes the policy without echoing the value — the
+    PIN must not turn up in a response body, and an admin API error is a
+    response body like any other.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not isinstance(value, str) or not guest_pin.is_valid_pin(value):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"PIN must be {guest_pin.PIN_MIN_LENGTH}-{guest_pin.PIN_MAX_LENGTH} digits"
+            ),
+        )
+    return await guest_pin.hash_pin(value)
 
 
 def _clean_name(value: Any) -> str | None:
@@ -288,6 +313,26 @@ async def update_token_expiry(
         await db.unrevoke_token(token_id)
     row = await db.get_token_by_id(token_id)
     return _row_to_response(row)
+
+
+@router.patch("/tokens/{token_id}/pin")
+async def update_token_pin(
+    token_id: str,
+    body: TokenPinRequest,
+    _: str = Depends(require_admin),
+) -> dict:
+    """Set, replace, or clear the token's PIN.
+
+    There is no read side. Changing or clearing the PIN also invalidates every
+    guest PIN session for the token, because those cookies are signed with a key
+    derived from the hash this writes.
+    """
+    row = await db.get_token_by_id(token_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    pin_hash = await _hash_pin_or_none(body.pin)
+    await db.set_token_pin(token_id, pin_hash)
+    return {"has_pin": pin_hash is not None}
 
 
 @router.post("/tokens/{token_id}/revoke")

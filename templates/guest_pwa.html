@@ -249,6 +249,7 @@ async function init() {
   try {
     const r = await fetch(`/g/${SLUG}/state`);
     if (r.status === 410) { showExpired(); return; }
+    if (r.status === 401) { showPinEntry(); return; }
     if (!r.ok) throw new Error('Failed to load');
     const data = await r.json();
     states = data.states;
@@ -310,12 +311,20 @@ async function refetchState() {
   try {
     const r = await fetch(`/g/${SLUG}/state`);
     if (r.status === 410) { showExpired(); return; }
+    if (r.status === 401) { showPinEntry(); return; }
     if (!r.ok) return;
     const data = await r.json();
     states = data.states;
     entityOrder = data.entities;
     renderAll();
   } catch {}
+}
+
+// The PIN session lapsed (or the PIN changed) mid-visit. Reloading lands on
+// GET /g/<slug>, which serves the PIN screen — no second copy of that form here.
+function showPinEntry() {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  location.reload();
 }
 
 function showExpired() {
@@ -1232,6 +1241,7 @@ async function sendCmd(entityId, domain, service, extraData = {}) {
       body: JSON.stringify({ entity_id: entityId, service: `${domain}.${service}`, data: extraData }),
     });
     if (r.status === 410) { showExpired(); return; }
+    if (r.status === 401) { showPinEntry(); return; }
     if (r.status === 429) { showToast('Too many requests — slow down'); return; }
     if (!r.ok) showToast('Command failed');
   } catch {

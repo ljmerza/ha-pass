@@ -13,11 +13,18 @@ import time
 from typing import AsyncIterator
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Path, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Path, Request, status
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.templating import Jinja2Templates
 
 from app import database as db
+from app import guest_pin
 from app import ha_client
 from app.config import settings
 from app.context import base_context
@@ -64,6 +71,22 @@ CAMERA_SNAPSHOT_RPM = 120
 MAX_STREAMS_PER_TOKEN = 8
 _active_streams: dict[str, int] = {}
 _stream_lock = asyncio.Lock()
+
+# Brute-force budget for PIN entry, as (window_seconds, max_attempts) pairs.
+# Two keys, both of which an attempt has to pass, because neither alone works:
+#
+# Keyed on the token only, an attacker who rotates IPs still hits one shared
+# ceiling — but they can also spend that ceiling to lock the real guest out.
+# Keyed on the IP only, rotating addresses evades the limit entirely, and one
+# NAT'd household shares a budget across unrelated tokens.
+#
+# So: a tight per-(token, IP) budget catches the ordinary case, and a looser
+# per-token budget bounds total guesses no matter how many addresses are used.
+# The per-token ceiling is deliberately well above what a guest fumbling their
+# PIN needs, and still caps a 4-digit space at ~2400 guesses/day — the same
+# DoS-vs-brute-force trade the command limiter already makes per token.
+PIN_ATTEMPT_LIMITS_PER_IP = ((60.0, 5), (3600.0, 20))
+PIN_ATTEMPT_LIMITS_PER_TOKEN = ((60.0, 15), (3600.0, 100))
 
 # entity_id arrives in a URL path here (it does not anywhere else in this app) and
 # is interpolated into the upstream HA request, so it is matched against an exact
@@ -125,8 +148,47 @@ def _enforce_ip_allowlist(row, request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="IP not allowed")
 
 
+def _pin_gate_ok(row, request: Request) -> bool:
+    """True if this token carries no PIN, or this request already proved it.
+
+    A token with no PIN — the default — never reaches the signature check, so
+    nothing about those requests changes.
+    """
+    pin_hash = row["pin_hash"]
+    if not pin_hash:
+        return True
+    return guest_pin.verify_session(
+        request.cookies.get(guest_pin.SESSION_COOKIE), row["id"], pin_hash
+    )
+
+
+def _is_https(request: Request) -> bool:
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    return request.url.scheme == "https" or forwarded_proto == "https"
+
+
+def _pin_cookie_path(request: Request, slug: str) -> str:
+    """Scope the PIN cookie to one token's own URL prefix.
+
+    Under HA ingress the app is mounted below /api/hassio_ingress/<token>, so the
+    path has to carry that prefix or the browser never sends the cookie back.
+    Narrowing to /g/<slug> also keeps a session for one token off the wire on
+    another token's requests — cookie paths match on whole segments, so /g/abc
+    is not sent for /g/abcdef. The HMAC binding in guest_pin is what actually
+    enforces the scoping; this just stops the cookie travelling needlessly.
+    """
+    return f"{request.state.ingress_path}/g/{slug}"
+
+
 async def _validate_token(slug: str, request: Request):
-    """Load and validate a token by slug. Raises HTTP 410 on any issue."""
+    """Load and validate a token by slug. Raises HTTP 410 on any issue.
+
+    The PIN gate lives here rather than in each handler so every guest endpoint
+    that reads state or performs an action inherits it, including ones added
+    later. Gating only the HTML page would leave /state, /stream, /command and
+    both camera endpoints reachable with nothing but the slug — the camera pair
+    being the worst of it, since those relay live frames.
+    """
     row = await db.get_token_by_slug(slug)
     if not row:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="Access unavailable")
@@ -136,6 +198,9 @@ async def _validate_token(slug: str, request: Request):
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="Access unavailable")
 
     _enforce_ip_allowlist(row, request)
+
+    if not _pin_gate_ok(row, request):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="PIN required")
 
     return row
 
@@ -224,6 +289,15 @@ async def guest_pwa(background_tasks: BackgroundTasks, request: Request, slug: s
         ctx = base_context(request)
         ctx.update({"slug": slug, "contact_message": settings.contact_message})
         return templates.TemplateResponse(request, "expired.html", ctx, status_code=exc.status_code)
+
+    # Locked tokens get the PIN screen instead of the app. Nothing is touched or
+    # logged yet — an unanswered prompt is not an access, the same way a request
+    # blocked by the IP allowlist above is not.
+    if not _pin_gate_ok(row, request):
+        ctx = base_context(request)
+        ctx.update({"slug": slug, "contact_message": settings.contact_message})
+        return templates.TemplateResponse(request, "pin_entry.html", ctx)
+
     await db.touch_token(row["id"])
     await db.log_access(
         token_id=row["id"],
@@ -241,6 +315,100 @@ async def guest_pwa(background_tasks: BackgroundTasks, request: Request, slug: s
         "never_expires": NEVER_EXPIRES_SECONDS,
     })
     return templates.TemplateResponse(request, "guest_pwa.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# PIN entry
+# ---------------------------------------------------------------------------
+
+@router.post("/{slug}/pin", response_class=HTMLResponse)
+async def guest_pin_submit(
+    request: Request,
+    slug: str = Path(max_length=64),
+    # No max_length here on purpose: a Form() constraint failure returns a 422
+    # whose body echoes the rejected `input`, which would put the PIN in a
+    # response. Length is checked below, where the answer is a generic error.
+    pin: str = Form(default=""),
+):
+    """Check a submitted PIN and, on success, hand back a session cookie.
+
+    POST rather than a query parameter so the PIN never reaches browser history,
+    a Referer header, or the reverse proxy's access log.
+    """
+    row = await db.get_token_by_slug(slug)
+    if not row or row["revoked"] or row["expires_at"] <= int(time.time()):
+        ctx = base_context(request)
+        ctx.update({"slug": slug, "contact_message": settings.contact_message})
+        return templates.TemplateResponse(request, "expired.html", ctx, status_code=410)
+
+    try:
+        _enforce_ip_allowlist(row, request)
+    except HTTPException as exc:
+        ctx = base_context(request)
+        ctx.update({"slug": slug, "contact_message": settings.contact_message})
+        return templates.TemplateResponse(request, "expired.html", ctx, status_code=exc.status_code)
+
+    pin_hash = row["pin_hash"]
+    if not pin_hash:
+        # Nothing to unlock. Same redirect a correct PIN gets, so a guest sitting
+        # on a bookmarked PIN page still lands on the app after an admin clears
+        # the PIN. That the token has none is already plain from GET /g/<slug>.
+        return RedirectResponse(
+            url=f"{request.state.ingress_path}/g/{slug}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # Per-(token, IP) first: a single address that has already burned its own
+    # budget is turned away without also spending the token-wide one.
+    ip_ok = await rate_limiter.check_multi(
+        f"pin:{row['id']}:{_client_ip(request)}", PIN_ATTEMPT_LIMITS_PER_IP
+    )
+    if not ip_ok or not await rate_limiter.check_multi(
+        f"pin:{row['id']}", PIN_ATTEMPT_LIMITS_PER_TOKEN
+    ):
+        ctx = base_context(request)
+        ctx.update({
+            "slug": slug,
+            "contact_message": settings.contact_message,
+            "error": "Too many attempts — please wait a minute and try again.",
+        })
+        return templates.TemplateResponse(
+            request, "pin_entry.html", ctx,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    if not guest_pin.is_valid_pin(pin) or not await guest_pin.verify_pin(pin, pin_hash):
+        ctx = base_context(request)
+        ctx.update({
+            "slug": slug,
+            "contact_message": settings.contact_message,
+            "error": "Incorrect PIN",
+        })
+        return templates.TemplateResponse(
+            request, "pin_entry.html", ctx,
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    value, max_age = guest_pin.issue_session(row["id"], pin_hash, row["expires_at"])
+    response = RedirectResponse(
+        url=f"{request.state.ingress_path}/g/{slug}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    response.set_cookie(
+        guest_pin.SESSION_COOKIE,
+        value,
+        httponly=True,
+        # Lax, not strict: guest links are opened from a text message or an
+        # email, and a strict cookie is withheld on that first cross-site
+        # navigation — the guest would be re-prompted every single time. Lax
+        # still withholds it from cross-site POSTs, so a forged command from
+        # another origin fails the gate.
+        samesite="lax",
+        secure=_is_https(request),
+        max_age=max_age,
+        path=_pin_cookie_path(request, slug),
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

@@ -202,6 +202,12 @@
           class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
       </div>
       <div>
+        <label for="f-pin" class="block text-xs font-mono uppercase tracking-wider text-muted mb-1.5">PIN <span class="text-muted/60 normal-case tracking-normal">(optional, 4-8 digits)</span></label>
+        <input id="f-pin" type="text" inputmode="numeric" maxlength="8" placeholder="Leave blank for no PIN"
+          class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm font-mono outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
+        <p class="text-xs text-muted mt-1">Guests must enter this before the link shows anything.</p>
+      </div>
+      <div>
         <label class="block text-xs font-mono uppercase tracking-wider text-muted mb-1.5">Entities</label>
         <div id="create-picker"></div>
       </div>
@@ -307,6 +313,31 @@
     <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-border-light dark:border-border-dark">
       <button data-action="close-modal" data-modal="extend" class="px-4 py-2 text-sm font-display font-medium rounded-xl border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
       <button id="extend-submit-btn" data-action="submit-extend" class="px-4 py-2 text-sm font-display font-semibold rounded-xl bg-primary hover:bg-primary-hover text-white transition-colors">Extend</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIN Modal -->
+<div class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="pin-modal">
+  <div class="modal-animate bg-surface-light dark:bg-surface-dark border border-border-light dark:border-border-dark rounded-2xl p-6 w-full max-w-sm shadow-xl" role="dialog" aria-modal="true" aria-labelledby="pin-modal-title">
+    <div class="flex items-center justify-between mb-3">
+      <h2 id="pin-modal-title" class="text-lg font-serif">PIN Protection</h2>
+      <button data-action="close-modal" data-modal="pin" aria-label="Close dialog" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-soot/5 dark:hover:bg-white/5 text-muted transition-colors">
+        <span aria-hidden="true" class="material-symbols-outlined text-xl">close</span>
+      </button>
+    </div>
+    <div id="pin-token-label" class="text-sm text-muted mb-1"></div>
+    <div id="pin-current-state" class="text-xs text-muted mb-4"></div>
+    <div>
+      <label for="pin-input-field" class="block text-xs font-mono uppercase tracking-wider text-muted mb-1.5">New PIN <span class="text-muted/60 normal-case tracking-normal">(4-8 digits, blank to remove)</span></label>
+      <input id="pin-input-field" type="text" inputmode="numeric" maxlength="8" placeholder="e.g. 4821"
+        class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm font-mono outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
+    </div>
+    <p class="text-xs text-muted/70 mt-2">PINs are stored hashed and can never be shown again. Saving a new PIN — or removing one — signs out every guest who had already entered the old one.</p>
+    <div id="pin-error" role="alert" class="text-primary text-xs min-h-[18px] mt-2"></div>
+    <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-border-light dark:border-border-dark">
+      <button data-action="close-modal" data-modal="pin" class="px-4 py-2 text-sm font-display font-medium rounded-xl border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
+      <button data-action="submit-pin" class="px-4 py-2 text-sm font-display font-semibold rounded-xl bg-primary hover:bg-primary-hover text-white transition-colors">Save</button>
     </div>
   </div>
 </div>
@@ -657,6 +688,10 @@ function renderTokens() {
             <span aria-hidden="true" class="material-symbols-outlined text-sm">block</span> Revoke
           </button>
         </div>
+        <button data-id="${esc(t.id)}" data-label="${esc(t.label)}" data-action="open-pin-modal"
+          class="w-full mt-2 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium border transition-colors ${t.has_pin ? 'border-ink/30 text-ink bg-ink/10 hover:bg-ink/20' : 'border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5'}">
+          <span aria-hidden="true" class="material-symbols-outlined text-sm">${t.has_pin ? 'lock' : 'lock_open'}</span> ${t.has_pin ? 'PIN Protected' : 'Add PIN'}
+        </button>
       </div>
     </div></li>`;
   }).join('');
@@ -818,6 +853,7 @@ function openCreateModal(preset = {}) {
   document.getElementById('f-label').value = preset.label || '';
   document.getElementById('f-slug').value = '';
   document.getElementById('f-ip').value = (preset.ipAllowlist || []).join(', ');
+  document.getElementById('f-pin').value = '';
   document.getElementById('f-expiry').value = preset.expiryValue || '86400';
   document.getElementById('create-error').textContent = '';
   document.getElementById('f-custom-expiry').classList.add('hidden');
@@ -838,9 +874,12 @@ async function submitCreate() {
   const ipList = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : null;
   const errEl = document.getElementById('create-error');
 
+  const pin = document.getElementById('f-pin').value.trim() || null;
+
   if (!label) { errEl.textContent = 'Label is required.'; return; }
   if (expiresIn === null) { errEl.textContent = 'Invalid expiry date. Must be in the future.'; return; }
   if (createPicker.selected.size === 0) { errEl.textContent = 'Select at least one entity.'; return; }
+  if (pin && !PIN_RE.test(pin)) { errEl.textContent = 'PIN must be 4-8 digits.'; return; }
 
   const body = {
     label, slug,
@@ -848,6 +887,7 @@ async function submitCreate() {
     entity_meta: createPicker.meta,
     expires_in_seconds: expiresIn,
     ip_allowlist: ipList,
+    pin,
   };
 
     const r = await fetch(`${BASE}/admin/tokens`, {
@@ -944,6 +984,47 @@ function submitEntityMeta() {
   closeModal('entity-modal');
   entityModalCtx = { containerId: null, entityId: null };
   renderPicker(containerId, pickerState);
+}
+
+// ── PIN Modal ─────────────────────────────────────────────────────────
+// PINs are stored hashed, so there is nothing to prefill — the modal reports
+// only whether one is set and takes a replacement.
+const PIN_RE = /^\d{4,8}$/;
+let pinTokenId = null;
+
+function openPinModal(tokenId, label) {
+  pinTokenId = tokenId;
+  const t = tokens.find(x => x.id === tokenId);
+  document.getElementById('pin-token-label').textContent = label;
+  document.getElementById('pin-current-state').textContent =
+    t?.has_pin ? 'A PIN is currently set.' : 'No PIN is set — this link opens straight away.';
+  document.getElementById('pin-input-field').value = '';
+  document.getElementById('pin-error').textContent = '';
+  openModal('pin-modal');
+}
+
+function closePinModal() { closeModal('pin-modal'); pinTokenId = null; }
+
+async function submitPin() {
+  if (!pinTokenId) return;
+  const errEl = document.getElementById('pin-error');
+  const pin = document.getElementById('pin-input-field').value.trim() || null;
+  if (pin && !PIN_RE.test(pin)) { errEl.textContent = 'PIN must be 4-8 digits.'; return; }
+
+  const r = await fetch(`${BASE}/admin/tokens/${pinTokenId}/pin`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ pin }),
+  });
+
+  if (r.ok) {
+    closePinModal();
+    showToast(pin ? 'PIN updated' : 'PIN removed', 'success');
+    loadTokens();
+  } else {
+    const err = await r.json().catch(() => ({}));
+    errEl.textContent = err.detail || 'Error saving PIN.';
+  }
 }
 
 // ── Edit Entities Modal ───────────────────────────────────────────────
@@ -1228,6 +1309,7 @@ document.addEventListener('keydown', e => {
       'confirm-modal': closeConfirmModal,
       'extend-modal': closeExtendModal,
       'edit-modal': closeEditModal,
+      'pin-modal': closePinModal,
       'create-modal': closeCreateModal,
     };
     for (const [id, closer] of Object.entries(closers)) {
@@ -1288,6 +1370,10 @@ document.addEventListener('click', e => {
     // Duplicate token
     case 'duplicate-token': duplicateToken(el.dataset.id); break;
 
+    // PIN modal
+    case 'open-pin-modal': openPinModal(el.dataset.id, el.dataset.label); break;
+    case 'submit-pin': submitPin(); break;
+
     // Extend modal
     case 'open-extend-modal': openExtendModal(el.dataset.id, el.dataset.label, el.dataset.status); break;
     case 'submit-extend': submitExtend(); break;
@@ -1302,7 +1388,7 @@ document.addEventListener('click', e => {
 
     // Close any modal
     case 'close-modal': {
-      const modalMap = { create: closeCreateModal, edit: closeEditModal, extend: closeExtendModal, confirm: closeConfirmModal, qr: closeQrModal, entity: closeEntityModal };
+      const modalMap = { create: closeCreateModal, edit: closeEditModal, extend: closeExtendModal, confirm: closeConfirmModal, qr: closeQrModal, entity: closeEntityModal, pin: closePinModal };
       const closer = modalMap[el.dataset.modal];
       if (closer) closer();
       break;
