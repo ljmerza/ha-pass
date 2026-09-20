@@ -407,7 +407,8 @@
       </button>
     </div>
     <canvas id="qr-canvas" width="256" height="256" class="mx-auto mb-3"></canvas>
-    <div id="qr-url" class="text-xs text-muted font-mono break-all mb-4"></div>
+    <a id="qr-url" target="_blank" rel="noopener noreferrer"
+       class="block text-xs text-muted hover:text-primary font-mono break-all mb-4 underline decoration-dotted underline-offset-2 transition-colors"></a>
     <button id="qr-copy-btn" data-action="copy-url" class="w-full py-2.5 rounded-xl border border-border-light dark:border-border-dark text-sm font-display font-medium hover:bg-soot/5 dark:hover:bg-white/5 transition-colors flex items-center justify-center gap-1.5">
       <span aria-hidden="true" class="material-symbols-outlined text-sm">content_copy</span> Copy Link
     </button>
@@ -1573,7 +1574,10 @@ function fallbackCopy(text) {
 
 // ── QR Code ───────────────────────────────────────────────────────────
 function showQr(url) {
-  document.getElementById('qr-url').textContent = url;
+  // The guest link itself, openable in a new tab to check what a guest sees.
+  const urlEl = document.getElementById('qr-url');
+  urlEl.textContent = url;
+  urlEl.href = url;
   document.getElementById('qr-copy-btn').dataset.url = url;
 
   const canvas = document.getElementById('qr-canvas');
