@@ -67,25 +67,50 @@ DISPLAY_NAME_MAX = 64
 # grants light.turn_on, so these only decide what the guest UI draws.
 ENTITY_OPTION_KEYS: set[str] = {"show_brightness", "show_color"}
 
-# Colour keys HA's light.turn_on understands. Only rgb_color is accepted from a
-# guest: it is the one the colour wheel sends, and every other format would need
-# its own range check before it could be forwarded safely.
+# Colour keys HA's light.turn_on understands. Only rgb_color and
+# color_temp_kelvin are accepted from a guest: they are what the colour wheel
+# and the warm-cool slider send, and every other format would need its own range
+# check before it could be forwarded safely. The mired `color_temp` stays in the
+# rejected set on purpose — HA removed it in favour of the kelvin key.
 LIGHT_COLOR_KEYS: set[str] = {
     "rgb_color", "rgbw_color", "rgbww_color", "hs_color", "xy_color",
     "color_temp", "color_temp_kelvin", "color_name", "profile", "white",
 }
 GUEST_COLOR_KEY = "rgb_color"
+GUEST_TEMP_KEY = "color_temp_kelvin"
+GUEST_COLOR_KEYS: set[str] = {GUEST_COLOR_KEY, GUEST_TEMP_KEY}
+
+# Absolute bounds for a guest colour temperature, in kelvin. Deliberately wider
+# than HA's own 2000-6535 fallbacks: every bulb publishes its own
+# min_color_temp_kelvin/max_color_temp_kelvin and some sit outside that pair.
+# The slider clamps to the bulb's range; this only rejects values no lamp could
+# mean, because narrowing it to the real entity would cost a state lookup on
+# every command.
+KELVIN_MIN = 1000
+KELVIN_MAX = 20000
 
 
 def validate_light_color(data: dict[str, Any]) -> str | None:
     """Check a guest light.turn_on payload's colour. Returns an error, or None.
 
-    The wheel posts whatever the guest's pointer produced, so the value is
-    shape- and range-checked here rather than handed to HA as-is.
+    The wheel and the temperature slider post whatever the guest's pointer
+    produced, so the values are shape- and range-checked here rather than handed
+    to HA as-is.
     """
     for key in data:
-        if key in LIGHT_COLOR_KEYS and key != GUEST_COLOR_KEY:
+        if key in LIGHT_COLOR_KEYS and key not in GUEST_COLOR_KEYS:
             return f"Colour format '{key}' is not accepted"
+    # HA's colour formats are mutually exclusive and it picks one silently when
+    # given both. Neither guest control ever sends a pair, so an ambiguous
+    # payload is rejected rather than resolved here.
+    if GUEST_COLOR_KEY in data and GUEST_TEMP_KEY in data:
+        return f"Send either {GUEST_COLOR_KEY} or {GUEST_TEMP_KEY}, not both"
+    if GUEST_TEMP_KEY in data:
+        kelvin = data[GUEST_TEMP_KEY]
+        # bool again: True would otherwise be an int inside the range check.
+        if (isinstance(kelvin, bool) or not isinstance(kelvin, int)
+                or not KELVIN_MIN <= kelvin <= KELVIN_MAX):
+            return f"{GUEST_TEMP_KEY} must be an integer from {KELVIN_MIN} to {KELVIN_MAX}"
     if GUEST_COLOR_KEY not in data:
         return None
     # Membership, not .get() — an explicit null is a malformed colour, not an

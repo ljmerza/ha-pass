@@ -245,9 +245,9 @@
       <p class="text-[11px] text-muted mt-1.5 ml-6.5">Off by default — the guest gets on/off only.</p>
       <label class="flex items-center gap-2.5 cursor-pointer mt-3">
         <input id="entity-show-color" type="checkbox" class="w-4 h-4 rounded border-border-light dark:border-border-dark accent-primary">
-        <span class="text-sm">Show colour wheel</span>
+        <span class="text-sm">Show colour controls</span>
       </label>
-      <p class="text-[11px] text-muted mt-1.5 ml-6.5">Also off by default, and only drawn for lights Home Assistant reports as colour-capable.</p>
+      <p class="text-[11px] text-muted mt-1.5 ml-6.5">Also off by default. The guest gets a colour wheel, a warm-cool slider, or both — whichever Home Assistant reports the light supports.</p>
     </div>
 
     <div id="entity-proximity" class="mt-4 pt-4 border-t border-border-light dark:border-border-dark">
@@ -793,7 +793,7 @@ function renderPicker(containerId, pickerState) {
               ${esc(renamed || e.friendly_name || e.entity_id)}
               ${renamed ? '<span aria-hidden="true" class="material-symbols-outlined text-accent" style="font-size:14px" title="Renamed">edit</span>' : ''}
               ${showsBrightness ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Brightness slider shown">brightness_high</span>' : ''}
-              ${showsColor ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Colour wheel shown">palette</span>' : ''}
+              ${showsColor ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Colour controls shown">palette</span>' : ''}
               ${gated ? '<span aria-hidden="true" class="material-symbols-outlined text-primary" style="font-size:14px" title="Guest must be at the property">location_on</span>' : ''}
             </div>
             <div class="text-[11px] text-muted font-mono truncate">${esc(e.entity_id)}</div>

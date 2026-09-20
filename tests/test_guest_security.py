@@ -426,13 +426,16 @@ async def test_malformed_rgb_color_is_rejected(client, sample_token, mock_ha_cli
 @pytest.mark.parametrize("key,value", [
     ("hs_color", [400, 200]),
     ("xy_color", [9, 9]),
+    ("rgbw_color", [255, 0, 0, 0]),
     ("rgbww_color", [255, 0, 0, 0, 0]),
-    ("color_temp_kelvin", 1),
+    ("color_temp", 300),          # the deprecated mired key, not the kelvin one
     ("color_name", "goldenrod"),
     ("profile", "relax"),
+    ("white", 200),
 ])
 async def test_other_color_formats_are_rejected(client, sample_token, mock_ha_client, key, value):
-    """Only rgb_color is accepted — no unchecked colour format reaches HA."""
+    """Only rgb_color and color_temp_kelvin are accepted — nothing unchecked
+    reaches HA."""
     resp = await client.post(
         f"/g/{sample_token['slug']}/command",
         json={
@@ -468,6 +471,93 @@ async def test_forbidden_data_keys_still_rejected_alongside_colour(
     assert "area_id" not in service_data
     assert "label_id" not in service_data
     assert service_data["rgb_color"] == [0, 255, 0]
+
+
+@pytest.mark.parametrize("kelvin", [2700, 1000, 20000])
+async def test_valid_color_temp_kelvin_reaches_ha(
+    client, sample_token, mock_ha_client, kelvin
+):
+    """The warm-cool slider's payload passes validation and arrives intact."""
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {"color_temp_kelvin": kelvin},
+        },
+    )
+    assert resp.status_code == 200
+    domain, service, service_data = mock_ha_client["call_service"].call_args[0]
+    assert (domain, service) == ("light", "turn_on")
+    assert service_data == {"color_temp_kelvin": kelvin, "entity_id": "light.living_room"}
+
+
+@pytest.mark.parametrize("kelvin", [
+    2700.5,                     # float
+    "2700",                     # string
+    True,                       # bools are ints in Python — must still be rejected
+    False,
+    None,                       # explicit null
+    [2700],                     # list
+    {"kelvin": 2700},           # mapping
+    999,                        # below the absolute floor
+    20001,                      # above the absolute ceiling
+    0,
+    -2700,
+])
+async def test_malformed_color_temp_kelvin_is_rejected(
+    client, sample_token, mock_ha_client, kelvin
+):
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {"color_temp_kelvin": kelvin},
+        },
+    )
+    assert resp.status_code == 422
+    mock_ha_client["call_service"].assert_not_called()
+
+
+async def test_rgb_and_kelvin_together_are_rejected(client, sample_token, mock_ha_client):
+    """HA's colour formats are mutually exclusive; an ambiguous pair is refused
+    rather than silently resolved."""
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {"rgb_color": [255, 128, 0], "color_temp_kelvin": 2700},
+        },
+    )
+    assert resp.status_code == 422
+    mock_ha_client["call_service"].assert_not_called()
+
+
+async def test_forbidden_data_keys_still_rejected_alongside_kelvin(
+    client, sample_token, mock_ha_client
+):
+    """The allowlist guard applies to a temperature payload too."""
+    resp = await client.post(
+        f"/g/{sample_token['slug']}/command",
+        json={
+            "entity_id": "light.living_room",
+            "service": "light.turn_on",
+            "data": {
+                "color_temp_kelvin": 4000,
+                "entity_id": "light.MALICIOUS",
+                "area_id": "sneaky",
+                "label_id": "all_lights",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    service_data = mock_ha_client["call_service"].call_args[0][2]
+    assert service_data["entity_id"] == "light.living_room"
+    assert "area_id" not in service_data
+    assert "label_id" not in service_data
+    assert service_data["color_temp_kelvin"] == 4000
 
 
 async def test_colour_check_does_not_touch_other_domains(client, sample_token, mock_ha_client):

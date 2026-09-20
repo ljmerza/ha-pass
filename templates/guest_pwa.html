@@ -67,6 +67,13 @@
     box-shadow: 0 1px 4px rgba(0,0,0,.45), 0 0 0 1px rgba(0,0,0,.15);
     transform: translate(-50%, -50%); pointer-events: none;
   }
+  /* Warm-to-cool track. Taller than the brightness slider so the gradient
+     reads as a temperature; the gradient itself is set inline from the bulb's
+     own kelvin range. */
+  input[type="range"].color-temp-range {
+    height: 10px; border-radius: 5px; border: 1px solid var(--hex-muted-ui);
+  }
+  .dark input[type="range"].color-temp-range { border-color: var(--hex-muted-dark); }
   .color-swatch {
     width: 26px; height: 26px; border-radius: 50%; padding: 0; flex-shrink: 0;
     border: 1px solid var(--hex-muted-ui); cursor: pointer;
@@ -187,6 +194,16 @@
       <input type="password" id="sheet-code" autocomplete="off" inputmode="numeric" placeholder="Code" aria-label="Alarm code"
         class="w-full py-3 px-4 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-center text-lg font-mono tracking-[0.3em] outline-none focus:border-primary">
     </div>
+    <!-- Colour / White switch. Drawn only when the bulb does both: HA's colour
+         modes are mutually exclusive, so the two widgets take turns instead of
+         stacking and implying they blend. -->
+    <div class="hidden mb-4 gap-1 p-1 rounded-xl bg-soot/5 dark:bg-white/5" id="sheet-color-tabs"
+      role="group" aria-label="Colour mode">
+      <button type="button" id="sheet-tab-color" data-action="color-tab" data-tab="color" aria-pressed="true"
+        class="flex-1 py-2 rounded-lg text-sm font-display font-semibold">Colour</button>
+      <button type="button" id="sheet-tab-white" data-action="color-tab" data-tab="white" aria-pressed="false"
+        class="flex-1 py-2 rounded-lg text-sm font-display font-semibold">White</button>
+    </div>
     <!-- Shown only for colour-capable lights the token opted in. The wheel
          applies live, so this sheet has nothing to confirm: Confirm is hidden
          and Cancel becomes Done while it is up. -->
@@ -197,6 +214,19 @@
         tabindex="0" data-wheel-action="color">
         <div class="color-wheel-thumb absolute rounded-full" id="sheet-wheel-thumb"></div>
       </div>
+    </div>
+    <!-- Warm-to-cool white, for bulbs that report color_temp. The track
+         gradient is built from the bulb's own min/max kelvin so both ends show
+         what this lamp can actually do. -->
+    <div class="hidden mb-5" id="sheet-temp-wrap">
+      <div class="flex items-center gap-3">
+        <span aria-hidden="true" class="material-symbols-outlined text-base text-muted">local_fire_department</span>
+        <input type="range" class="color-temp-range" id="sheet-temp" min="2000" max="6535" value="2700"
+          aria-label="Colour temperature" data-range-action="color-temp"
+          data-display-id="sheet-temp-val" data-display-suffix="K">
+        <span aria-hidden="true" class="material-symbols-outlined text-base text-muted">ac_unit</span>
+      </div>
+      <p class="text-xs text-muted mt-2 tabular-nums font-mono" id="sheet-temp-val">2700K</p>
     </div>
     <div class="flex gap-3">
       <button data-action="close-sheet" id="sheet-cancel" class="flex-1 py-3.5 rounded-xl bg-soot/5 dark:bg-white/5 text-sm font-display font-semibold">Cancel</button>
@@ -611,6 +641,57 @@ function showsColorWheel(eid, state) {
   return entityOption(eid, 'show_color') && lightSupportsColor(state);
 }
 
+// A bulb listing color_temp takes a warm-to-cool white instead of, or alongside,
+// the wheel. The same show_color toggle grants it: one opt-in for "colour
+// control", and the bulb decides which widgets that buys.
+function lightSupportsColorTemp(state) {
+  return (state?.attributes?.supported_color_modes || []).includes('color_temp');
+}
+
+function showsColorTemp(eid, state) {
+  return entityOption(eid, 'show_color') && lightSupportsColorTemp(state);
+}
+
+// One swatch, either widget behind it.
+function showsColorControls(eid, state) {
+  return showsColorWheel(eid, state) || showsColorTemp(eid, state);
+}
+
+// HA's own fallbacks, for a bulb that claims color_temp and publishes no bounds.
+const DEFAULT_MIN_KELVIN = 2000;
+const DEFAULT_MAX_KELVIN = 6535;
+// Mirrors KELVIN_MIN/KELVIN_MAX in app/models.py: the slider clamps to the
+// bulb's range, and the bulb's range is clamped to what the server accepts.
+const KELVIN_FLOOR = 1000;
+const KELVIN_CEILING = 20000;
+
+function lightTempRange(state) {
+  const attrs = state?.attributes || {};
+  const rawMin = Number(attrs.min_color_temp_kelvin);
+  const rawMax = Number(attrs.max_color_temp_kelvin);
+  let min = Number.isFinite(rawMin) && rawMin > 0 ? Math.round(rawMin) : DEFAULT_MIN_KELVIN;
+  let max = Number.isFinite(rawMax) && rawMax > 0 ? Math.round(rawMax) : DEFAULT_MAX_KELVIN;
+  min = Math.min(Math.max(min, KELVIN_FLOOR), KELVIN_CEILING - 1);
+  max = Math.min(Math.max(max, min + 1), KELVIN_CEILING);
+  return [min, max];
+}
+
+// Planckian curve fit (Tanner Helland's). Close enough for a swatch and a track
+// gradient, and using the one function keeps the two showing the same colour.
+function kelvinToRgb(kelvin) {
+  const t = Math.min(KELVIN_CEILING, Math.max(KELVIN_FLOOR, Number(kelvin) || KELVIN_FLOOR)) / 100;
+  const r = t <= 66 ? 255 : 329.698727446 * Math.pow(t - 60, -0.1332047592);
+  const g = t <= 66 ? 99.4708025861 * Math.log(t) - 161.1195681661
+    : 288.1221695283 * Math.pow(t - 60, -0.0755148492);
+  const b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return [r, g, b].map(c => Math.round(Math.min(255, Math.max(0, c))));
+}
+
+function kelvinCss(kelvin) {
+  const [r, g, b] = kelvinToRgb(kelvin);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 // Value is pinned to 1: the wheel picks hue and saturation, brightness is the
 // slider's job, and folding it in here would fight that control.
 function hsvToRgb(h, s) {
@@ -640,7 +721,14 @@ function hsToOffset(h, s) {
 }
 
 function swatchColor(state) {
-  const [r, g, b] = state?.attributes?.rgb_color || [255, 255, 255];
+  const attrs = state?.attributes || {};
+  // In white mode the swatch comes from the kelvin value, not from rgb_color:
+  // not every integration fills rgb_color while in colour-temp mode, and
+  // deriving it keeps the swatch and the slider's gradient in agreement.
+  if (attrs.color_mode === 'color_temp' && attrs.color_temp_kelvin != null) {
+    return kelvinCss(attrs.color_temp_kelvin);
+  }
+  const [r, g, b] = attrs.rgb_color || [255, 255, 255];
   return `rgb(${Number(r) || 0}, ${Number(g) || 0}, ${Number(b) || 0})`;
 }
 
@@ -648,7 +736,7 @@ function buildLightControls(eid, state) {
   if (state.state !== 'on') return '';
   // Both are opt-in: with neither enabled for this entity the light is on/off only.
   const showBrightness = entityOption(eid, 'show_brightness');
-  const showColor = showsColorWheel(eid, state);
+  const showColor = showsColorControls(eid, state);
   if (!showBrightness && !showColor) return '';
 
   const brightness = Number(state.attributes?.brightness) || 255;
@@ -1068,7 +1156,7 @@ function updateLightCard(eid, state, card) {
   const hasSlider = Boolean(card.querySelector('input[data-range-action="brightness"]'));
   const hasSwatch = Boolean(card.querySelector(`#swatch-${cssId(eid)}`));
   const wantsSlider = on && entityOption(eid, 'show_brightness');
-  const wantsSwatch = on && showsColorWheel(eid, state);
+  const wantsSwatch = on && showsColorControls(eid, state);
 
   if (hasSlider !== wantsSlider || hasSwatch !== wantsSwatch) {
     const parent = card.parentElement;
@@ -1097,6 +1185,8 @@ function updateLightCard(eid, state, card) {
     // HA's echo repositions the thumb only when the guest is not dragging it —
     // the drag owns the thumb until the pointer comes up.
     if (wheelSheetEid === eid && !activeWheel) positionWheelThumb(state.attributes?.rgb_color);
+    // Same bargain for the temperature slider.
+    if (wheelSheetEid === eid && !activeTemp) positionTempSlider(state);
   }
 }
 
@@ -1418,6 +1508,7 @@ let wheelSheetEid = null;
 // instead of at the speed HA echoes the change over SSE.
 let wheelHs = [0, 0];
 let wheelSend = { lastSent: 0, lastRgb: null };
+let tempSend = { lastSent: 0, lastKelvin: null };
 
 function positionWheelThumb(rgb) {
   wheelHs = rgbToHs(rgb);
@@ -1434,18 +1525,70 @@ function renderWheelThumb() {
   if (wheel) wheel.setAttribute('aria-valuenow', String(Math.round(wheelHs[0])));
 }
 
+// Slides the temperature track under the pointer: min/max come from the bulb,
+// so the ends of the track are the ends of what it can do.
+function positionTempSlider(state) {
+  const slider = document.getElementById('sheet-temp');
+  if (!slider || !wheelSheetEid) return;
+  const [min, max] = lightTempRange(state);
+  const raw = Number(state?.attributes?.color_temp_kelvin);
+  // A bulb sitting in colour mode reports no kelvin; start the slider halfway
+  // rather than pinned to one end.
+  const kelvin = Number.isFinite(raw) && raw > 0
+    ? Math.min(Math.max(Math.round(raw), min), max)
+    : Math.round((min + max) / 2);
+  slider.min = min;
+  slider.max = max;
+  slider.value = kelvin;
+  slider.style.background =
+    `linear-gradient(to right, ${kelvinCss(min)}, ${kelvinCss((min + max) / 2)}, ${kelvinCss(max)})`;
+  document.getElementById('sheet-temp-val').textContent = kelvin + 'K';
+}
+
+// The switch only decides which widget is on screen; it sends nothing. A tap
+// that silently recoloured the bulb would be a surprise.
+function showColorTab(tab) {
+  const white = tab === 'white';
+  document.getElementById('sheet-wheel-wrap').classList.toggle('hidden', white);
+  document.getElementById('sheet-temp-wrap').classList.toggle('hidden', !white);
+  for (const [id, active] of [['sheet-tab-color', !white], ['sheet-tab-white', white]]) {
+    const btn = document.getElementById(id);
+    btn.setAttribute('aria-pressed', String(active));
+    btn.classList.toggle('bg-surface-light', active);
+    btn.classList.toggle('dark:bg-surface-dark', active);
+    btn.classList.toggle('shadow-sm', active);
+    btn.classList.toggle('text-muted', !active);
+  }
+}
+
 function showSheetWheel(eid) {
   wheelSheetEid = eid;
   wheelSend = { lastSent: -WHEEL_THROTTLE_MS, lastRgb: null };
-  document.getElementById('sheet-wheel-wrap').classList.toggle('hidden', !eid);
+  tempSend = { lastSent: -WHEEL_THROTTLE_MS, lastKelvin: null };
+  const state = eid ? states[eid] : null;
+  const wheel = Boolean(eid) && showsColorWheel(eid, state);
+  const temp = Boolean(eid) && showsColorTemp(eid, state);
+  const tabs = document.getElementById('sheet-color-tabs');
+  tabs.classList.toggle('hidden', !(wheel && temp));
+  tabs.classList.toggle('flex', wheel && temp);
   document.getElementById('sheet-ok').classList.toggle('hidden', Boolean(eid));
   document.getElementById('sheet-cancel').textContent = eid ? 'Done' : 'Cancel';
-  if (eid) positionWheelThumb(states[eid]?.attributes?.rgb_color);
+  if (!eid) {
+    document.getElementById('sheet-wheel-wrap').classList.add('hidden');
+    document.getElementById('sheet-temp-wrap').classList.add('hidden');
+    return;
+  }
+  // Open on the mode the light is actually in, so the sheet matches the swatch.
+  showColorTab(temp && (!wheel || state?.attributes?.color_mode === 'color_temp') ? 'white' : 'color');
+  if (wheel) positionWheelThumb(state?.attributes?.rgb_color);
+  if (temp) positionTempSlider(state);
 }
 
 function openColorSheet(eid) {
   document.getElementById('sheet-title').textContent = displayName(eid, states[eid]);
-  document.getElementById('sheet-body').textContent = 'Drag the wheel — the light follows as you go.';
+  document.getElementById('sheet-body').textContent = showsColorWheel(eid, states[eid])
+    ? 'Drag the wheel — the light follows as you go.'
+    : 'Slide from warm to cool — the light follows as you go.';
   showSheetWheel(eid);
   openSheet();
 }
@@ -1532,6 +1675,9 @@ document.addEventListener('click', e => {
     case 'open-color-sheet':
       openColorSheet(eid);
       break;
+    case 'color-tab':
+      showColorTab(el.dataset.tab);
+      break;
     case 'close-sheet':
       closeSheet();
       break;
@@ -1561,6 +1707,8 @@ document.addEventListener('input', e => {
   if (!el.dataset.rangeAction) return;
   const display = document.getElementById(el.dataset.displayId);
   if (display) display.textContent = el.value + (el.dataset.displaySuffix ?? '%');
+  // The temperature slider applies live; the rest commit on release.
+  if (el.dataset.rangeAction === 'color-temp') sendTempColor(false);
 });
 
 document.addEventListener('change', e => {
@@ -1580,6 +1728,7 @@ document.addEventListener('change', e => {
   else if (action === 'volume') sendVolume(eid, el.value);
   else if (action === 'fan-speed') sendCmd(eid, 'fan', 'set_percentage', { percentage: parseInt(el.value) });
   else if (action === 'input-number') sendCmd(eid, 'input_number', 'set_value', { value: parseFloat(el.value) });
+  else if (action === 'color-temp') sendTempColor(true);
 });
 
 // ── Colour Wheel Drag ────────────────────────────────────────────────
@@ -1592,6 +1741,7 @@ document.addEventListener('change', e => {
 // whichever throttled tick landed last.
 const WHEEL_THROTTLE_MS = 250;
 let activeWheel = null;  // { rect } for as long as a pointer is down on the wheel
+let activeTemp = false;  // true for as long as a pointer is down on the temperature slider
 
 function applyWheelPointer(e, commit) {
   const rect = activeWheel.rect;
@@ -1640,6 +1790,31 @@ document.addEventListener('pointerup', e => {
 });
 
 document.addEventListener('pointercancel', () => { activeWheel = null; });
+
+// The temperature slider is a native range, so the browser already tracks the
+// pointer and handles the arrow keys. These only tell HA's echo to keep its
+// hands off the thumb until the drag ends, the same bargain the wheel makes.
+document.addEventListener('pointerdown', e => {
+  if (e.target.closest('[data-range-action="color-temp"]')) activeTemp = true;
+});
+
+document.addEventListener('pointerup', () => { activeTemp = false; });
+document.addEventListener('pointercancel', () => { activeTemp = false; });
+
+// Same throttle and the same send-on-release as the wheel, so the kelvin that
+// sticks is the one the finger left the track on.
+function sendTempColor(commit) {
+  const slider = document.getElementById('sheet-temp');
+  if (!slider || !wheelSheetEid) return;
+  const kelvin = parseInt(slider.value, 10);
+  if (!Number.isFinite(kelvin)) return;
+  const now = performance.now();
+  if (!commit && now - tempSend.lastSent < WHEEL_THROTTLE_MS) return;
+  // Release after a throttled tick that already sent this value: skip it.
+  if (kelvin === tempSend.lastKelvin) return;
+  tempSend = { lastSent: now, lastKelvin: kelvin };
+  sendCmd(wheelSheetEid, 'light', 'turn_on', { color_temp_kelvin: kelvin });
+}
 
 // The wheel is focusable, so it also steps by keyboard: hue sideways,
 // saturation up and down.
