@@ -1,6 +1,6 @@
 services:
-  ha-pass:
-    image: ghcr.io/rohithkadaveru/ha-pass:latest
+  homepass:
+    image: ghcr.io/ljmerza/homepass:latest
     restart: unless-stopped
     ports:
       - 5880:5880

@@ -1,8 +1,8 @@
-name: HAPass
+name: HomePass
 version: "0.3.0"
-slug: ha-pass
+slug: homepass
 description: Shareable guest links for controlling Home Assistant devices
-url: "https://github.com/rohithkadaveru/ha-pass"
+url: "https://github.com/ljmerza/homepass"
 arch: [amd64, aarch64]
 startup: application
 boot: auto
@@ -10,12 +10,12 @@ homeassistant_api: true
 ingress: true
 ingress_port: 5880
 panel_icon: "mdi:shield-key"
-panel_title: "HAPass"
+panel_title: "HomePass"
 webui: "http://[HOST]:[PORT:5880]/admin/dashboard"
 ports:
   "5880/tcp": 5880
 ports_description:
-  "5880/tcp": "HAPass guest links (direct access)"
+  "5880/tcp": "HomePass guest links (direct access)"
 backup: cold
 options:
   admin_username: ""
@@ -33,4 +33,4 @@ schema:
   brand_bg: str
   brand_primary: str
   guest_url: "str?"
-image: "ghcr.io/rohithkadaveru/ha-pass"
+image: "ghcr.io/ljmerza/homepass"

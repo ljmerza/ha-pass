@@ -1,4 +1,4 @@
-# HAPass
+# HomePass
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -8,6 +8,10 @@ Create time-limited links that give guests control of specific Home Assistant
 entities — lights, locks, thermostats, fans, and more. Guests get a
 mobile-friendly PWA with real-time state updates. No HA accounts needed, no app
 installs, just a link.
+
+> HomePass is a fork of [Rohithkadaveru/ha-pass](https://github.com/Rohithkadaveru/ha-pass),
+> which has been unmaintained since April 2026. Original work is MIT-licensed and
+> copyright Rohith Kadaveru; see [LICENSE](LICENSE).
 
 ## Screenshots
 
@@ -38,13 +42,13 @@ installs, just a link.
 1. Add this repository in **Settings → Add-ons → Add-on Store → ⋮ → Repositories**:
 
    ```
-   https://github.com/rohithkadaveru/ha-pass
+   https://github.com/ljmerza/homepass
    ```
 
-2. Find **HAPass** in the store and click **Install**.
+2. Find **HomePass** in the store and click **Install**.
 3. Go to the **Configuration** tab and set your options.
 4. Start the add-on.
-5. Click **Open Web UI** or find HAPass in the HA sidebar.
+5. Click **Open Web UI** or find HomePass in the HA sidebar.
 
 Admin access works through the HA sidebar — no separate login needed. Guest
 links use the direct port (`http://<your-ha-ip>:5880/g/{slug}`) so visitors
@@ -54,8 +58,8 @@ don't need HA accounts.
 
 ```yaml
 services:
-  ha-pass:
-    image: ghcr.io/rohithkadaveru/ha-pass:latest
+  homepass:
+    image: ghcr.io/ljmerza/homepass:latest
     restart: unless-stopped
     ports:
       - 5880:5880
@@ -82,18 +86,18 @@ docker run -d --restart unless-stopped \
   -e ADMIN_PASSWORD=changeme \
   -e HA_BASE_URL=http://homeassistant.local:8123 \
   -e HA_TOKEN=your_long_lived_token_here \
-  ghcr.io/rohithkadaveru/ha-pass:latest
+  ghcr.io/ljmerza/homepass:latest
 ```
 
 The admin dashboard is at `http://localhost:5880/admin/dashboard`.
 
-> **Note:** Docker deployments need a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token) from Home Assistant. Create one in your HA profile under **Security → Long-Lived Access Tokens**, from a user with **Administrator** enabled — Home Assistant only lets admins POST to `/api/events/`, so a non-admin token runs guest commands fine but cannot fire HAPass's activity events. The add-on handles this automatically.
+> **Note:** Docker deployments need a [long-lived access token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token) from Home Assistant. Create one in your HA profile under **Security → Long-Lived Access Tokens**, from a user with **Administrator** enabled — Home Assistant only lets admins POST to `/api/events/`, so a non-admin token runs guest commands fine but cannot fire HomePass's activity events. The add-on handles this automatically.
 
 ## Configuration
 
 ### Add-on Options
 
-Set these in **Settings → Add-ons → HAPass → Configuration**:
+Set these in **Settings → Add-ons → HomePass → Configuration**:
 
 | Option | Description | Default |
 |---|---|---|
@@ -123,9 +127,9 @@ Set these in **Settings → Add-ons → HAPass → Configuration**:
 
 ## Home Assistant Activity Events
 
-HAPass emits a `ha_pass_activity` event after a valid guest page load and after
+HomePass emits a `ha_pass_activity` event after a valid guest page load and after
 a successful guest command. These events are best-effort notification hooks:
-HAPass logs and drops event failures without blocking the guest. HAPass also
+HomePass logs and drops event failures without blocking the guest. HomePass also
 writes matching Home Assistant Logbook entries for the Activity view.
 
 Event payloads do not include the guest slug, internal token ID, or client IP
@@ -146,7 +150,7 @@ URL was requested; link previews, scanners, stale bookmarks, and refreshes can
 also trigger it. Use `command` for higher-signal notifications.
 
 ```yaml
-alias: HAPass guest activity notification
+alias: HomePass guest activity notification
 triggers:
   - trigger: event
     event_type: ha_pass_activity
@@ -196,7 +200,7 @@ Browser (Guest PWA)
     └── POST /g/{slug}/command  → service call proxy
                                       │
                                       ▼
-                                  HAPass
+                                  HomePass
                                   (FastAPI)
                                       │
                                       ├── REST API → Home Assistant
@@ -205,7 +209,7 @@ Browser (Guest PWA)
 
 ## Disclaimer
 
-HAPass is not affiliated with, endorsed by, or associated with Home Assistant
+HomePass is not affiliated with, endorsed by, or associated with Home Assistant
 or Nabu Casa Inc. "Home Assistant" is a trademark of Nabu Casa Inc.
 
 ## License

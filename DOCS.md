@@ -1,14 +1,14 @@
-# HAPass
+# HomePass
 
 Shareable guest links for controlling Home Assistant devices.
 
 ## What it does
 
-HAPass lets you create time-limited guest links that expose specific Home Assistant entities (lights, locks, switches, etc.) to visitors. No HA account required. Guests get a mobile-friendly PWA with real-time state updates.
+HomePass lets you create time-limited guest links that expose specific Home Assistant entities (lights, locks, switches, etc.) to visitors. No HA account required. Guests get a mobile-friendly PWA with real-time state updates.
 
 ## Accessing the admin UI
 
-After installing, HAPass appears in the Home Assistant side panel. Click it to open the admin dashboard. No separate login needed, HA handles authentication automatically.
+After installing, HomePass appears in the Home Assistant side panel. Click it to open the admin dashboard. No separate login needed, HA handles authentication automatically.
 
 For direct port access (e.g., `http://<your-ha-ip>:5880/admin/dashboard`), set **Admin Username** and **Admin Password** in the configuration below.
 
