@@ -3,6 +3,12 @@ const CACHE_VERSION = 'CACHE_VERSION_PLACEHOLDER';
 // Only local assets in install cache — cross-origin fonts are cached at
 // runtime via cache-first in the fetch handler. This prevents SW install
 // failure on LAN-only deployments where Google Fonts is unreachable.
+//
+// Plain paths on purpose. Pages request these with a ?v=<build> suffix, but the
+// build is stamped into this file's CACHE_VERSION only, so precaching the
+// versioned URLs would mean templating the list too. The fetch handler matches
+// with ignoreSearch instead, and a new build gets a new cache name, so a stale
+// entry can never survive to be matched.
 const SHELL_ASSETS = [
   '/static/dist.css',
   '/static/icons/icon-192.png',
@@ -47,7 +53,10 @@ self.addEventListener('fetch', event => {
   // stale-while-revalidate
   if (url.pathname.startsWith('/static/')) {
     event.respondWith(
-      caches.match(event.request).then(cached => {
+      // ignoreSearch, or the ?v=<build> on every asset URL would miss the
+      // plain paths precached at install and fall through to the network on
+      // every single load — a silently disabled cache.
+      caches.match(event.request, { ignoreSearch: true }).then(cached => {
         const fetchPromise = fetch(event.request).then(response => {
           const clone = response.clone();
           caches.open(CACHE_VERSION).then(cache => cache.put(event.request, clone));

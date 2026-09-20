@@ -8,7 +8,7 @@
 <meta name="theme-color" content="{{ brand_bg }}" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="{{ brand_bg_dark }}" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="{{ base_path }}/g/{{ slug }}/manifest.json" crossorigin="use-credentials">
-<link rel="apple-touch-icon" href="{{ base_path }}/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="{{ base_path }}/static/icons/icon-192.png?v={{ build_version }}">
 {% endblock %}
 
 {% block body_attrs %}class="bg-bg-light dark:bg-bg-dark text-soot dark:text-gray-100 font-sans antialiased min-h-dvh flex items-center justify-center text-center p-8"{% endblock %}
@@ -40,5 +40,5 @@
 {% endblock %}
 
 {% block body_scripts %}
-<script src="{{ base_path }}/static/theme.js"></script>
+<script src="{{ base_path }}/static/theme.js?v={{ build_version }}"></script>
 {% endblock %}

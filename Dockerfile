@@ -42,6 +42,14 @@ RUN chmod +x run.sh
 
 RUN mkdir -p /data
 
+# Last of the cacheable instructions on purpose: GIT_SHA changes on every
+# commit, and an ARG placed above the pip install would invalidate that layer on
+# every build. app/build.py reads it to stamp ?v= on static asset URLs; the
+# builder stage declares its own copy for the service-worker cache name, equally
+# late, where nothing is left below it to invalidate.
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
+
 EXPOSE 5880
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \

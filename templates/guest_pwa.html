@@ -10,7 +10,7 @@
 <meta name="theme-color" content="{{ brand_bg }}" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="{{ brand_bg_dark }}" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="{{ base_path }}/g/{{ slug }}/manifest.json" crossorigin="use-credentials">
-<link rel="apple-touch-icon" href="{{ base_path }}/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="{{ base_path }}/static/icons/icon-192.png?v={{ build_version }}">
 {% endblock %}
 
 {% block fouc_extra %}
@@ -262,9 +262,9 @@
 {% endblock %}
 
 {% block body_scripts %}
-<script src="{{ base_path }}/static/util.js"></script>
-<script src="{{ base_path }}/static/domains.js"></script>
-<script src="{{ base_path }}/static/theme.js"></script>
+<script src="{{ base_path }}/static/util.js?v={{ build_version }}"></script>
+<script src="{{ base_path }}/static/domains.js?v={{ build_version }}"></script>
+<script src="{{ base_path }}/static/theme.js?v={{ build_version }}"></script>
 <script nonce="{{ csp_nonce }}">
 requestAnimationFrame(updateThemeToggles);
 
@@ -1991,6 +1991,10 @@ function dismissInstallBanner() {
 }
 
 // ── Service Worker ───────────────────────────────────────────────────
+// The one static URL that carries no ?v= build stamp: a browser never serves
+// the top-level worker script from its own HTTP cache, and changing this URL
+// would re-point a live registration's script for no gain. The assets the
+// worker caches are versioned, and its cache name carries the build too.
 if ('serviceWorker' in navigator) {
   if (!('{{ base_path }}')) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
 }

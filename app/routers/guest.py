@@ -27,6 +27,7 @@ from app import database as db
 from app import guest_pin
 from app import ha_client
 from app import proximity
+from app.build import BUILD_VERSION
 from app.config import settings
 from app.context import base_context
 from app.models import (
@@ -665,6 +666,10 @@ async def guest_pin_submit(
 @router.get("/{slug}/manifest.json")
 async def guest_manifest(request: Request, slug: str = Path(max_length=64)):
     bp = request.state.ingress_path
+    # Same ?v= stamp the templates put on their asset tags. An installed PWA
+    # re-reads the manifest and its icons rarely, so an unversioned icon URL is
+    # the longest-lived stale asset of the lot.
+    v = BUILD_VERSION
     manifest = {  # colors must match static/input.css
         "name": settings.app_name,
         "short_name": settings.app_name[:12],
@@ -676,13 +681,13 @@ async def guest_manifest(request: Request, slug: str = Path(max_length=64)):
         "theme_color": settings.brand_primary,
         "orientation": "portrait",
         "icons": [
-            {"src": f"{bp}/static/icons/icon-192.png", "sizes": "192x192",
+            {"src": f"{bp}/static/icons/icon-192.png?v={v}", "sizes": "192x192",
              "type": "image/png", "purpose": "any"},
-            {"src": f"{bp}/static/icons/icon-512.png", "sizes": "512x512",
+            {"src": f"{bp}/static/icons/icon-512.png?v={v}", "sizes": "512x512",
              "type": "image/png", "purpose": "any"},
-            {"src": f"{bp}/static/icons/icon-maskable-192.png", "sizes": "192x192",
+            {"src": f"{bp}/static/icons/icon-maskable-192.png?v={v}", "sizes": "192x192",
              "type": "image/png", "purpose": "maskable"},
-            {"src": f"{bp}/static/icons/icon-maskable-512.png", "sizes": "512x512",
+            {"src": f"{bp}/static/icons/icon-maskable-512.png?v={v}", "sizes": "512x512",
              "type": "image/png", "purpose": "maskable"},
         ],
     }
