@@ -28,14 +28,14 @@ PIN_MIN_LENGTH = 4
 PIN_MAX_LENGTH = 8
 _PIN_RE = re.compile(rf"^\d{{{PIN_MIN_LENGTH},{PIN_MAX_LENGTH}}}$")
 
-SESSION_COOKIE = "ha_guest_pin_session"
+SESSION_COOKIE = "homepass_pin_session"
 
 # How long one correct entry lasts before the guest is asked again. Matches the
 # admin session lifetime; always clamped down to the token's own expiry.
 SESSION_TTL_SECONDS = 86400
 
 _SESSION_VERSION = "v1"
-_SESSION_KEY_INFO = b"hapass-guest-pin-session-v1"
+_SESSION_KEY_INFO = b"homepass-guest-pin-session-v1"
 
 
 def is_valid_pin(pin: str) -> bool:

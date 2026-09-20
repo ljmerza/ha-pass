@@ -1,4 +1,4 @@
-"""Alembic environment configuration for HAPass.
+"""Alembic environment configuration for HomePass.
 
 Runs synchronous SQLite migrations using raw SQL (no SQLAlchemy models).
 The database URL is derived from app.config.settings.db_path.

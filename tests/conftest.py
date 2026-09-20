@@ -1,4 +1,4 @@
-"""Shared fixtures for HAPass test suite.
+"""Shared fixtures for HomePass test suite.
 
 Environment variables MUST be set before any app imports because:
 - app.config.Settings() evaluates at import time

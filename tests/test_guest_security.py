@@ -63,7 +63,7 @@ async def test_successful_command_emits_activity_event(client, sample_token, moc
     assert resp.status_code == 200
     mock_ha_client["fire_event"].assert_called_once()
     event_type, payload = mock_ha_client["fire_event"].call_args[0]
-    assert event_type == "ha_pass_activity"
+    assert event_type == "homepass_activity"
     assert payload == {
         "schema_version": 1,
         "activity": "command",
@@ -74,7 +74,7 @@ async def test_successful_command_emits_activity_event(client, sample_token, moc
     assert sample_token["slug"] not in payload.values()
     assert sample_token["id"] not in payload.values()
     mock_ha_client["logbook_log"].assert_called_once_with({
-        "name": "HAPass",
+        "name": "HomePass",
         "message": "Test Token used light.turn_on on light.living_room",
         "entity_id": "light.living_room",
         "domain": "light",
@@ -123,7 +123,7 @@ def _ha_refusal(status_code: int, path: str) -> httpx.HTTPStatusError:
 
 async def test_event_401_does_not_break_command_or_access_log(client, sample_token, mock_ha_client):
     """A non-admin token still runs the command, still gets logged, still logbooks."""
-    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/homepass_activity")
     resp = await client.post(
         f"/g/{sample_token['slug']}/command",
         json={"entity_id": "light.living_room", "service": "turn_on"},
@@ -144,7 +144,7 @@ async def test_event_401_does_not_break_command_or_access_log(client, sample_tok
 
 
 async def test_event_401_is_explained_once_and_then_latched(client, sample_token, mock_ha_client, caplog):
-    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/homepass_activity")
     with caplog.at_level(logging.INFO, logger="app.routers.guest"):
         for _ in range(3):
             resp = await client.post(
@@ -186,7 +186,7 @@ async def test_logbook_403_latches_independently_of_the_event(client, sample_tok
 
 async def test_transient_event_failure_is_retried_not_latched(client, sample_token, mock_ha_client, caplog):
     """A 502 is a blip, not a permission problem — keep trying, keep warning."""
-    mock_ha_client["fire_event"].side_effect = _ha_refusal(502, "/api/events/ha_pass_activity")
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(502, "/api/events/homepass_activity")
     with caplog.at_level(logging.INFO, logger="app.routers.guest"):
         for _ in range(2):
             resp = await client.post(
@@ -203,7 +203,7 @@ async def test_transient_event_failure_is_retried_not_latched(client, sample_tok
 async def test_latched_event_channel_recovers_without_a_restart(client, sample_token, mock_ha_client, caplog):
     import app.routers.guest as guest_mod
 
-    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/homepass_activity")
     resp = await client.post(
         f"/g/{sample_token['slug']}/command",
         json={"entity_id": "light.living_room", "service": "turn_on"},
@@ -227,7 +227,7 @@ async def test_latched_event_channel_recovers_without_a_restart(client, sample_t
 
 
 async def test_event_401_on_page_load_does_not_break_the_page(client, sample_token, mock_ha_client):
-    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/ha_pass_activity")
+    mock_ha_client["fire_event"].side_effect = _ha_refusal(401, "/api/events/homepass_activity")
     resp = await client.get(f"/g/{sample_token['slug']}")
     assert resp.status_code == 200
     assert mock_ha_client["logbook_log"].call_count == 1
@@ -758,7 +758,7 @@ async def test_guest_pwa_valid_token_renders_page(client, sample_token, mock_ha_
     assert row["last_accessed"] is not None
     mock_ha_client["fire_event"].assert_called_once()
     event_type, payload = mock_ha_client["fire_event"].call_args[0]
-    assert event_type == "ha_pass_activity"
+    assert event_type == "homepass_activity"
     assert payload == {
         "schema_version": 1,
         "activity": "page_load",
@@ -769,7 +769,7 @@ async def test_guest_pwa_valid_token_renders_page(client, sample_token, mock_ha_
     assert sample_token["slug"] not in payload.values()
     assert sample_token["id"] not in payload.values()
     mock_ha_client["logbook_log"].assert_called_once_with({
-        "name": "HAPass",
+        "name": "HomePass",
         "message": "Test Token opened guest link",
     })
 

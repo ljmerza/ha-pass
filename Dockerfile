@@ -20,7 +20,7 @@ RUN mkdir -p static/icons && python generate_icons.py
 RUN tailwindcss -i static/input.css -o static/dist.css --minify
 
 ARG GIT_SHA=dev
-RUN sed -i "s/CACHE_VERSION_PLACEHOLDER/ha-pass-${GIT_SHA}/" static/sw.js
+RUN sed -i "s/CACHE_VERSION_PLACEHOLDER/homepass-${GIT_SHA}/" static/sw.js
 
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM python:3.12-slim

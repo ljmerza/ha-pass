@@ -1,4 +1,4 @@
-"""HAPass — FastAPI entry point."""
+"""HomePass — FastAPI entry point."""
 import asyncio
 import logging
 import os
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="HAPass",
+    title="HomePass",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,

@@ -16,7 +16,7 @@ _hashed: bytes | None = (
     else None
 )
 
-SESSION_COOKIE = "ha_guest_admin_session"
+SESSION_COOKIE = "homepass_admin_session"
 INGRESS_SENTINEL = "__ingress__"
 
 

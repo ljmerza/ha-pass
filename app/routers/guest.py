@@ -125,7 +125,7 @@ _PENDING_SSE_EVENTS = {"token_expired", "token_activated"}
 _states_cache: list[dict] | None = None
 _states_cache_ts: float = 0
 STATE_CACHE_TTL = 30  # seconds
-ACTIVITY_EVENT_TYPE = "ha_pass_activity"
+ACTIVITY_EVENT_TYPE = "homepass_activity"
 ACTIVITY_SCHEMA_VERSION = 1
 PAGE_LOAD_EVENT_DEBOUNCE_SECONDS = 30
 _page_load_activity_ts: dict[str, float] = {}
@@ -156,19 +156,19 @@ _ACTIVITY_DENIED_HELP = {
         f"Home Assistant refused the {ACTIVITY_EVENT_TYPE} event with HTTP %d and "
         "will refuse every later one: POST /api/events/ is admin-only, so HA_TOKEN "
         "has to be a long-lived access token belonging to a Home Assistant user "
-        "with Administrator enabled. HAPass has stopped firing these events, so HA "
+        "with Administrator enabled. HomePass has stopped firing these events, so HA "
         f"automations that trigger on {ACTIVITY_EVENT_TYPE} will not run. Guest "
-        "access, HAPass's own access log and the dashboard's Recent Activity are "
-        "unaffected. Give the token's user Administrator and HAPass picks the "
+        "access, HomePass's own access log and the dashboard's Recent Activity are "
+        "unaffected. Give the token's user Administrator and HomePass picks the "
         "events back up within an hour — no restart needed."
     ),
     "logbook": (
         "Home Assistant refused the logbook.log service call with HTTP %d and will "
         "refuse every later one: the user behind HA_TOKEN is not permitted to call "
-        "it. HAPass has stopped writing them, so guest activity will not appear in "
-        "the Home Assistant logbook. Guest access, HAPass's own access log and the "
+        "it. HomePass has stopped writing them, so guest activity will not appear in "
+        "the Home Assistant logbook. Guest access, HomePass's own access log and the "
         "dashboard's Recent Activity are unaffected. Fix the token's permissions "
-        "and HAPass picks the entries back up within an hour — no restart needed."
+        "and HomePass picks the entries back up within an hour — no restart needed."
     ),
 }
 
@@ -201,7 +201,7 @@ templates = Jinja2Templates(directory="templates")
 def _client_ip(request: Request) -> str:
     """Extract the client IP from X-Forwarded-For (set by reverse proxy).
 
-    IMPORTANT: HAPass MUST be deployed behind a reverse proxy (Caddy, nginx,
+    IMPORTANT: HomePass MUST be deployed behind a reverse proxy (Caddy, nginx,
     Cloudflare Tunnel, etc.) that overwrites the X-Forwarded-For header with the
     true client IP. Without this, clients can spoof their IP to bypass allowlists.
     """
@@ -418,7 +418,7 @@ def _note_activity_failure(channel: str, exc: Exception) -> None:
 def _note_activity_success(channel: str) -> None:
     """Unlatch a channel HA has started accepting again."""
     if _activity_denied.pop(channel, None) is not None:
-        logger.info("Home Assistant is accepting HAPass %s activity again.", channel)
+        logger.info("Home Assistant is accepting HomePass %s activity again.", channel)
 
 
 async def _fire_activity_event(payload: dict) -> None:
@@ -441,7 +441,7 @@ def _logbook_payload(payload: dict) -> dict:
     if payload["activity"] == "command":
         target_entity_id = payload["target_entity_id"]
         data = {
-            "name": "HAPass",
+            "name": "HomePass",
             "message": f"{token_label} used {payload['service']} on {target_entity_id}",
             "entity_id": target_entity_id,
         }
@@ -449,7 +449,7 @@ def _logbook_payload(payload: dict) -> dict:
             data["domain"] = target_entity_id.split(".", 1)[0]
         return data
     return {
-        "name": "HAPass",
+        "name": "HomePass",
         "message": f"{token_label} opened guest link",
     }
 

@@ -127,7 +127,7 @@ Set these in **Settings → Add-ons → HomePass → Configuration**:
 
 ## Home Assistant Activity Events
 
-HomePass emits a `ha_pass_activity` event after a valid guest page load and after
+HomePass emits a `homepass_activity` event after a valid guest page load and after
 a successful guest command. These events are best-effort notification hooks:
 HomePass logs and drops event failures without blocking the guest. HomePass also
 writes matching Home Assistant Logbook entries for the Activity view.
@@ -153,7 +153,7 @@ also trigger it. Use `command` for higher-signal notifications.
 alias: HomePass guest activity notification
 triggers:
   - trigger: event
-    event_type: ha_pass_activity
+    event_type: homepass_activity
 conditions:
   - condition: template
     value_template: "{{ trigger.event.data.activity == 'command' }}"

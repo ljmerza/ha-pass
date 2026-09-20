@@ -587,19 +587,19 @@ _REGISTRY_DENIED_HELP = {
     "unauthorized": (
         "Home Assistant refused to list its entity/label registry and will refuse "
         "every later read: the user behind HA_TOKEN is not permitted to read it. "
-        "HAPass has stopped asking, so the admin entity picker has no label filter. "
+        "HomePass has stopped asking, so the admin entity picker has no label filter. "
         "Everything else — the entity list itself, guest access, tokens — is "
-        "unaffected. Fix the token's permissions and HAPass picks labels back up "
+        "unaffected. Fix the token's permissions and HomePass picks labels back up "
         "within an hour, no restart needed."
     ),
     "unknown_command": (
         "Home Assistant does not offer config/entity_registry/list or "
-        "config/label_registry/list, so HAPass cannot read labels and the admin "
+        "config/label_registry/list, so HomePass cannot read labels and the admin "
         "entity picker has no label filter. Nothing else is affected. This usually "
         "means a Home Assistant too old to have the label registry."
     ),
     WS_CODE_AUTH_FAILED: (
-        "Home Assistant rejected HA_TOKEN on the WebSocket API, so HAPass cannot "
+        "Home Assistant rejected HA_TOKEN on the WebSocket API, so HomePass cannot "
         "read labels and the admin entity picker has no label filter. Replace "
         "HA_TOKEN with a valid long-lived access token."
     ),
@@ -638,7 +638,7 @@ def _note_registry_success() -> None:
     global _registry_denied_at
     if _registry_denied_at is not None:
         _registry_denied_at = None
-        logger.info("Home Assistant is answering HAPass registry reads again.")
+        logger.info("Home Assistant is answering HomePass registry reads again.")
 
 
 async def get_label_registry() -> dict[str, Any] | None:
