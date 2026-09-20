@@ -1991,12 +1991,19 @@ function dismissInstallBanner() {
 }
 
 // ── Service Worker ───────────────────────────────────────────────────
+// Registered from /g/sw.js, not /static/sw.js: a worker only controls pages
+// under the directory it is served from, and /static/ holds no pages, so a
+// worker registered there installed happily and controlled nothing. The scope
+// is passed explicitly to state which pages it is for; it is the script's own
+// directory, the widest scope a browser grants without the server also sending
+// a Service-Worker-Allowed header.
+//
 // The one static URL that carries no ?v= build stamp: a browser never serves
 // the top-level worker script from its own HTTP cache, and changing this URL
 // would re-point a live registration's script for no gain. The assets the
 // worker caches are versioned, and its cache name carries the build too.
 if ('serviceWorker' in navigator) {
-  if (!('{{ base_path }}')) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+  if (!('{{ base_path }}')) navigator.serviceWorker.register('/g/sw.js', { scope: '/g/' }).catch(() => {});
 }
 
 // One entry point, chosen once: a pending page runs the preview and nothing

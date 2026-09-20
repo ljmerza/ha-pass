@@ -15,6 +15,7 @@ from typing import AsyncIterator
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Path, Request, status
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -27,7 +28,7 @@ from app import database as db
 from app import guest_pin
 from app import ha_client
 from app import proximity
-from app.build import BUILD_VERSION
+from app.build import BUILD_VERSION, STATIC_DIR
 from app.config import settings
 from app.context import base_context
 from app.models import (
@@ -486,6 +487,32 @@ def _schedule_page_load_activity(background_tasks: BackgroundTasks, row) -> None
         return
     _page_load_activity_ts[token_id] = now
     _schedule_activity_event(background_tasks, _activity_payload(row, "page_load"))
+
+
+# ---------------------------------------------------------------------------
+# Service worker
+# ---------------------------------------------------------------------------
+# Served from under /g/ rather than from /static/ because a worker's default
+# scope is the directory it is served from. At /static/sw.js that scope was
+# /static/, which holds no pages, so no guest page was ever controlled and the
+# fetch handler never ran. Here the default scope is /g/ — every guest page and
+# nothing else — so the registration needs no Service-Worker-Allowed header and
+# the admin UI stays outside the worker entirely.
+#
+# Declared above /{slug} on purpose: routes match in declaration order and the
+# slug route would otherwise answer this path with the expired page. A token
+# cannot collide with it either — generated slugs are hex and a custom one is
+# [a-z0-9_-], neither of which can contain a dot.
+SW_PATH = STATIC_DIR / "sw.js"
+
+
+@router.get("/sw.js", include_in_schema=False)
+async def guest_service_worker():
+    """The shipped static/sw.js, with the CACHE_VERSION the build stamped into
+    it. Served from the file rather than templated so the Dockerfile's sed is
+    still what decides the cache name. The media type is explicit because a
+    worker served as anything but JavaScript fails to register."""
+    return FileResponse(SW_PATH, media_type="text/javascript")
 
 
 # ---------------------------------------------------------------------------
