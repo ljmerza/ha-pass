@@ -217,6 +217,10 @@
 requestAnimationFrame(updateThemeToggles);
 
 const SLUG = {{ slug | tojson }};
+// Empty in standalone mode; under HA ingress the page is served from
+// /api/hassio_ingress/<token>/, so every guest API call has to carry the prefix
+// the same way the static asset tags above do.
+const BASE = {{ base_path | tojson }};
 const EXPIRES_AT = {{ expires_at | tojson }};
 const NEVER_EXPIRES = {{ never_expires }};
 // True only when this token has at least one proximity-gated entity. Rendered
@@ -252,7 +256,7 @@ let expiryInterval = setInterval(() => {
 // ── Init ─────────────────────────────────────────────────────────────
 async function init() {
   try {
-    const r = await fetch(`/g/${SLUG}/state`);
+    const r = await fetch(`${BASE}/g/${SLUG}/state`);
     if (r.status === 410) { showExpired(); return; }
     if (r.status === 401) { showPinEntry(); return; }
     if (!r.ok) throw new Error('Failed to load');
@@ -278,7 +282,7 @@ function connectSSE() {
   dot.className = 'w-1.5 h-1.5 rounded-full bg-current';
   text.textContent = 'Connecting';
 
-  eventSource = new EventSource(`/g/${SLUG}/stream`);
+  eventSource = new EventSource(`${BASE}/g/${SLUG}/stream`);
 
   eventSource.addEventListener('connected', () => {
     const wasReconnect = sseRetryCount > 0;
@@ -314,7 +318,7 @@ function connectSSE() {
 async function refetchState() {
   tempValues = {};  // Clear stale temperature cache
   try {
-    const r = await fetch(`/g/${SLUG}/state`);
+    const r = await fetch(`${BASE}/g/${SLUG}/state`);
     if (r.status === 410) { showExpired(); return; }
     if (r.status === 401) { showPinEntry(); return; }
     if (!r.ok) return;
@@ -564,7 +568,7 @@ function buildCameraControls(eid, state) {
 function cameraStreamUrl(eid) {
   // Cache-busted so re-attaching after a hidden tab opens a fresh response
   // rather than reusing the aborted one.
-  return `/g/${SLUG}/camera/${encodeURIComponent(eid)}/stream?t=${Date.now()}`;
+  return `${BASE}/g/${SLUG}/camera/${encodeURIComponent(eid)}/stream?t=${Date.now()}`;
 }
 
 // Cameras stream for as long as the page is open. A backgrounded tab would
@@ -1306,7 +1310,7 @@ async function sendCmd(entityId, domain, service, extraData = {}) {
     body.location = fix;
   }
   try {
-    const r = await fetch(`/g/${SLUG}/command`, {
+    const r = await fetch(`${BASE}/g/${SLUG}/command`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),

@@ -54,3 +54,46 @@ async def test_ingress_logout_does_not_delete_real_sessions(client, mock_ha_clie
     assert resp.status_code == 200
     row = await db.get_admin_session(session_id)
     assert row is not None
+
+
+# ---------------------------------------------------------------------------
+# Guest PWA: API calls must carry the ingress prefix
+# ---------------------------------------------------------------------------
+
+INGRESS_PREFIX = "/api/hassio_ingress/abc123"
+
+
+async def test_guest_pwa_api_calls_carry_the_ingress_prefix(
+    client, mock_ha_client, sample_token
+):
+    """Under ingress the page is served from a prefixed path, so the state,
+    stream, command and camera URLs the JS builds have to be prefixed too.
+
+    They were root-absolute, which 404s behind the Supervisor proxy — the static
+    asset tags used base_path but the fetch/EventSource calls did not.
+    """
+    with patch.object(app.ingress, "_SUPERVISOR_TOKEN", "fake-supervisor-token"):
+        resp = await client.get(
+            "/g/test-token", headers={"X-Ingress-Path": INGRESS_PREFIX}
+        )
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert f'const BASE = "{INGRESS_PREFIX}"' in body
+    # No guest API path may start at the root.
+    assert "`/g/${SLUG}" not in body
+    for suffix in ("state", "stream", "command", "camera"):
+        assert f"${{BASE}}/g/${{SLUG}}/{suffix}" in body
+
+
+async def test_guest_pwa_api_calls_have_no_prefix_in_standalone_mode(
+    client, mock_ha_client, sample_token
+):
+    """Without a supervisor token BASE is empty, so the URLs stay root-absolute."""
+    with patch.object(app.ingress, "_SUPERVISOR_TOKEN", None):
+        resp = await client.get(
+            "/g/test-token", headers={"X-Ingress-Path": INGRESS_PREFIX}
+        )
+
+    assert resp.status_code == 200
+    assert 'const BASE = ""' in resp.text
