@@ -197,6 +197,13 @@
         </div>
       </div>
       <div>
+        <label for="f-starts-at" class="block text-xs font-mono uppercase tracking-wider text-muted mb-1.5">Valid From <span class="text-muted/60 normal-case tracking-normal">(optional)</span></label>
+        <input id="f-starts-at" type="datetime-local"
+          class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
+        <p id="f-starts-at-error" class="hidden text-xs text-primary mt-1">Start date must be in the future.</p>
+        <p class="text-xs text-muted mt-1">Leave blank to start now. The expiry above is counted from this time, so the link can be sent to the guest well before it opens.</p>
+      </div>
+      <div>
         <label for="f-ip" class="block text-xs font-mono uppercase tracking-wider text-muted mb-1.5">IP Allowlist</label>
         <input id="f-ip" type="text" placeholder="192.168.1.0/24"
           class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
@@ -568,8 +575,11 @@ function toggleActivity() {
 
 function tokenStatus(t) {
   if (t.revoked) return 'revoked';
-  if (t.expires_at >= NEVER_EXPIRES) return 'active';
   const now = Date.now() / 1000;
+  // Checked before expiry so a scheduled token reads as scheduled rather than
+  // expiring, and after revoked because revoking one settles the question.
+  if (t.starts_at && t.starts_at > now) return 'scheduled';
+  if (t.expires_at >= NEVER_EXPIRES) return 'active';
   if (t.expires_at < now) return 'expired';
   if ((t.expires_at - now) < 3600) return 'expiring';
   return 'active';
@@ -596,7 +606,9 @@ function updateStats() {
   let active = 0, expired = 0;
   tokens.forEach(t => {
     const s = tokenStatus(t);
-    if (s === 'active' || s === 'expiring') active++;
+    // A scheduled token is a live link that has not opened yet, not a dead
+    // one — it belongs in the same count as the rest of the working ones.
+    if (s === 'active' || s === 'expiring' || s === 'scheduled') active++;
     else expired++;
   });
   document.getElementById('stat-active').textContent = active;
@@ -614,18 +626,21 @@ function renderTokens() {
     return;
   }
 
-  const order = { active: 0, expiring: 1, expired: 2, revoked: 3 };
+  const order = { active: 0, expiring: 1, scheduled: 2, expired: 3, revoked: 4 };
   const sorted = [...tokens].sort((a, b) => order[tokenStatus(a)] - order[tokenStatus(b)]);
 
   grid.innerHTML = sorted.map(t => {
     const status = tokenStatus(t);
     const url = guestLink(t.slug);
-    const isActive = status === 'active' || status === 'expiring';
+    // Scheduled gets the full card: the link is real, so copying it, showing
+    // its QR and editing it all still make sense before it opens.
+    const isActive = status === 'active' || status === 'expiring' || status === 'scheduled';
     const lastAccess = t.last_accessed ? relativeTime(t.last_accessed) : 'Never';
 
     const badges = {
       active: { label: 'Active', icon: 'circle', dotClass: 'pulse-dot text-ink', bgClass: 'bg-ink/10 text-ink' },
       expiring: { label: 'Expiring', icon: 'schedule', dotClass: 'text-amber-600', bgClass: 'bg-amber-500/10 text-amber-600 dark:text-amber-400' },
+      scheduled: { label: 'Scheduled', icon: 'event_upcoming', dotClass: 'text-violet-500', bgClass: 'bg-violet-500/10 text-violet-500' },
       expired: { label: 'Expired', icon: 'timer_off', dotClass: 'text-muted', bgClass: 'bg-soot/5 dark:bg-white/5 text-muted' },
       revoked: { label: 'Revoked', icon: 'block', dotClass: 'text-muted', bgClass: 'bg-soot/5 dark:bg-white/5 text-muted' },
     };
@@ -635,6 +650,7 @@ function renderTokens() {
 
     const stripClass = status === 'active' ? 'from-ink to-blue-400'
       : status === 'expiring' ? 'from-accent to-amber-400'
+      : status === 'scheduled' ? 'from-violet-500 to-fuchsia-400'
       : 'from-gray-300 to-gray-400 dark:from-gray-600 dark:to-gray-700';
 
     if (!isActive) {
@@ -694,6 +710,10 @@ function renderTokens() {
             <span aria-hidden="true" class="material-symbols-outlined text-base">timer</span>
             <span>Expires ${relativeTime(t.expires_at)}</span>
           </div>
+          ${status === 'scheduled' ? `<div class="flex items-center gap-2 text-violet-500">
+            <span aria-hidden="true" class="material-symbols-outlined text-base">hourglass_top</span>
+            <span>Starts ${relativeTime(t.starts_at)}</span>
+          </div>` : ''}
           <div class="flex items-center gap-2 text-muted">
             <span aria-hidden="true" class="material-symbols-outlined text-base">history</span>
             <span>${esc(lastAccess)}</span>
@@ -742,6 +762,12 @@ function renderTokens() {
             <span aria-hidden="true" class="material-symbols-outlined text-sm">${t.has_pin ? 'lock' : 'lock_open'}</span> ${t.has_pin ? 'PIN Protected' : 'Add PIN'}
           </button>
         </div>
+        ${status === 'scheduled' ? `<div class="mt-2">
+          <button data-id="${esc(t.id)}" data-label="${esc(t.label)}" data-action="confirm-activate"
+            class="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium bg-violet-500/10 text-violet-500 hover:bg-violet-500/20 transition-colors">
+            <span aria-hidden="true" class="material-symbols-outlined text-sm">play_circle</span> Activate Now
+          </button>
+        </div>` : ''}
       </div>
     </div></li>`;
   }).join('');
@@ -1094,6 +1120,11 @@ function openCreateModal(preset = {}) {
   document.getElementById('f-never-warn').classList.add('hidden');
   document.getElementById('f-custom-error').classList.add('hidden');
   document.getElementById('f-custom-datetime').value = '';
+  // Always blank, including on a duplicate: a start time belongs to one
+  // booking the way the slug and the PIN belong to one guest, and a copy made
+  // for the next stay must not silently inherit the last one's check-in.
+  document.getElementById('f-starts-at').value = '';
+  document.getElementById('f-starts-at-error').classList.add('hidden');
   toggleCustomExpiry('f');
   renderPicker('create-picker', createPicker);
   openModal('create-modal');
@@ -1109,9 +1140,11 @@ async function submitCreate() {
   const errEl = document.getElementById('create-error');
 
   const pin = document.getElementById('f-pin').value.trim() || null;
+  const startsAt = getStartsAt();
 
   if (!label) { errEl.textContent = 'Label is required.'; return; }
   if (expiresIn === null) { errEl.textContent = 'Invalid expiry date. Must be in the future.'; return; }
+  if (startsAt === false) { errEl.textContent = 'Invalid start date. Must be in the future.'; return; }
   if (createPicker.selected.size === 0) { errEl.textContent = 'Select at least one entity.'; return; }
   if (pin && !PIN_RE.test(pin)) { errEl.textContent = 'PIN must be 4-8 digits.'; return; }
 
@@ -1120,6 +1153,7 @@ async function submitCreate() {
     entity_ids: [...createPicker.selected],
     entity_meta: createPicker.meta,
     expires_in_seconds: expiresIn,
+    starts_at: startsAt,
     ip_allowlist: ipList,
     pin,
   };
@@ -1376,6 +1410,18 @@ async function confirmRevoke(id) {
   });
 }
 
+async function confirmActivate(id, label) {
+  openConfirmModal(
+    'Activate Now',
+    `"${label}" starts working immediately and a guest already waiting on the link is let in at once. Its expiry does not move.`,
+    async () => {
+      const r = await fetch(`${BASE}/admin/tokens/${id}/activate`, { method: 'POST' });
+      if (r.ok) { showToast('Token activated', 'success'); loadTokens(); loadActivity(); }
+      else showToast('Error activating token', 'error');
+    },
+  );
+}
+
 async function confirmRotate(id) {
   openConfirmModal('Rotate Link', 'A new link is generated and the current one stops working immediately. Entities, expiry, PIN and history are kept — a guest with a PIN will be asked for it again.', async () => {
     const r = await fetch(`${BASE}/admin/tokens/${id}/rotate-slug`, { method: 'POST' });
@@ -1481,6 +1527,23 @@ function getExpirySeconds(prefix) {
     return seconds;
   }
   return parseInt(select.value);
+}
+
+// The optional "valid from" time, as epoch seconds. null means "start now",
+// which is the blank field and every token before this existed. false is the
+// error case and is distinguished from null on purpose — a date the admin
+// typed and got wrong must not silently become an immediately-live link.
+function getStartsAt() {
+  const errorEl = document.getElementById('f-starts-at-error');
+  errorEl.classList.add('hidden');
+  const raw = document.getElementById('f-starts-at').value;
+  if (!raw) return null;
+  const dt = new Date(raw);
+  if (isNaN(dt.getTime()) || dt.getTime() <= Date.now()) {
+    errorEl.classList.remove('hidden');
+    return false;
+  }
+  return Math.floor(dt.getTime() / 1000);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────
@@ -1656,6 +1719,7 @@ document.addEventListener('click', e => {
     case 'copy-url': copyUrl(el.dataset.url); break;
     case 'show-qr': showQr(el.dataset.url); break;
     case 'confirm-revoke': confirmRevoke(el.dataset.id); break;
+    case 'confirm-activate': confirmActivate(el.dataset.id, el.dataset.label); break;
     case 'confirm-rotate': confirmRotate(el.dataset.id); break;
     case 'confirm-delete': confirmDelete(el.dataset.id); break;
 

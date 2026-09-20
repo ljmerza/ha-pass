@@ -97,6 +97,7 @@ async def create_token(
     ip_allowlist: list[str] | None,
     entity_meta: dict[str, dict[str, Any]] | None = None,
     pin_hash: str | None = None,
+    starts_at: int | None = None,
 ) -> dict[str, Any]:
     db = await get_db()
     token_id = str(uuid.uuid4())
@@ -110,9 +111,9 @@ async def create_token(
         await db.execute("BEGIN IMMEDIATE")
         await db.execute(
             """INSERT INTO tokens
-               (id, slug, label, created_at, expires_at, ip_allowlist, pin_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (token_id, slug, label, now, expires_at, ip_json, pin_hash),
+               (id, slug, label, created_at, starts_at, expires_at, ip_allowlist, pin_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (token_id, slug, label, now, starts_at, expires_at, ip_json, pin_hash),
         )
         if entity_ids:
             meta = entity_meta or {}
@@ -313,6 +314,19 @@ async def update_token_expiry(token_id: str, expires_at: int) -> None:
         "UPDATE tokens SET expires_at = ? WHERE id = ?",
         (expires_at, token_id),
     )
+    await db.commit()
+
+
+async def activate_token_now(token_id: str) -> None:
+    """Drop a scheduled token's remaining delay. The link works from here on.
+
+    NULL is exactly the state a token that was never scheduled is in, so there
+    is nothing else to unwind — and expires_at is deliberately left where it is:
+    it was anchored to the start the admin chose, and that end is a calendar
+    fact, not a duration owed from whenever this was clicked.
+    """
+    db = await get_db()
+    await db.execute("UPDATE tokens SET starts_at = NULL WHERE id = ?", (token_id,))
     await db.commit()
 
 

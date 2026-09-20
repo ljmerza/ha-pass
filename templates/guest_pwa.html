@@ -140,10 +140,15 @@
             <span aria-hidden="true" class="material-symbols-outlined text-[14px]">dark_mode</span>
           </button>
         </div>
+        {# Nothing is connected while the link is pending — its stream carries
+           lifecycle events only — so the badge is not rendered rather than
+           left showing "Live" over a preview. #}
+        {% if not pending %}
         <span id="conn-badge" aria-live="polite" class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider bg-soot/5 dark:bg-white/5 text-muted">
           <span class="w-1.5 h-1.5 rounded-full bg-current" id="conn-dot"></span>
           <span id="conn-text">Connecting</span>
         </span>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -181,6 +186,23 @@
   <h2 class="text-2xl font-serif">Access Expired</h2>
   <p class="text-muted max-w-xs">Your guest session has ended. {{ contact_message }}</p>
 </div>
+
+{% if pending %}
+<!-- Scheduled-start banner. Docked and compact rather than a full-screen
+     blocker: the cards behind it are the guest's real ones, greyed out, so the
+     link can be shared ahead of time and still show what it will open. -->
+<div id="pending-banner" aria-live="polite" class="fixed bottom-0 inset-x-0 z-30 bg-surface-light dark:bg-surface-dark border-t border-border-light dark:border-border-dark shadow-card">
+  <div class="max-w-xl mx-auto px-4 py-3 flex items-center gap-3" style="padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));">
+    <div class="w-10 h-10 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
+      <span aria-hidden="true" class="material-symbols-outlined text-accent">schedule</span>
+    </div>
+    <div class="flex-1 min-w-0">
+      <div class="text-sm font-semibold">Not active yet</div>
+      <div class="text-xs text-muted">Opens in <span id="pending-timer" class="font-mono font-bold tabular-nums text-accent"></span> · <span id="pending-when"></span></div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 <!-- Confirm bottom sheet -->
 <div class="fixed inset-0 z-40 hidden items-end justify-center bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="sheet-backdrop">
@@ -258,6 +280,18 @@ const NEVER_EXPIRES = {{ never_expires }};
 // ordinary token's page carries no copy of that block, so it cannot prompt for
 // a position or so much as name the browser API that supplies one.
 const REQUIRES_LOCATION = {{ requires_location | tojson }};
+// True only before a scheduled token's start time. The page then renders a
+// greyed-out preview built from the two constants below and never reaches for
+// /state, /command or either camera endpoint — all of which the server refuses
+// until the window opens anyway.
+const PENDING = {{ pending | tojson }};
+const STARTS_AT = {{ starts_at | tojson }};
+const PREVIEW_ENTITY_IDS = {{ preview_entity_ids | tojson }};
+const PREVIEW_ENTITY_META = {{ preview_entity_meta | tojson }};
+// The countdown is measured against the server's clock, not the device's: a
+// phone a few minutes fast would otherwise reload early, be refused, and do it
+// again forever. The offset is taken once, at load.
+const CLOCK_OFFSET = {{ server_now | tojson }} - (Date.now() / 1000);
 let states = {};
 // Per-token overrides: { entity_id: {display_name, options, require_proximity} }
 let entityMeta = {};
@@ -300,6 +334,98 @@ async function init() {
     document.getElementById('cards-container').innerHTML =
       `<div class="flex flex-col items-center py-16 text-primary text-sm"><span aria-hidden="true" class="material-symbols-outlined text-3xl mb-2">error</span>Failed to load devices.<br><small class="text-muted">${esc(e.message)}</small></div>`;
   }
+}
+
+// ── Scheduled start ──────────────────────────────────────────────────
+// Everything here runs instead of init(), never alongside it, so a pending
+// page opens exactly one stream and issues exactly zero state requests.
+
+// One neutral resting state per domain, so a card draws its usual shape
+// without implying anything about the real device. Anything not listed falls
+// through to 'unavailable'. Cameras are left out deliberately: that is what
+// makes buildCameraControls draw nothing, so the preview never asks for a
+// frame from an endpoint that would refuse it.
+const PREVIEW_STATES = {
+  light: 'off', switch: 'off', input_boolean: 'off', group: 'off', fan: 'off',
+  climate: 'off', lock: 'locked', cover: 'closed', media_player: 'idle',
+};
+
+// The HA friendly_name lives in state this page may not fetch yet, so the
+// entity id supplies one. A per-token display name still wins where the admin
+// set one, because displayName() checks the override first.
+function previewName(eid) {
+  return eid.split('.').slice(1).join('.').split('_')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+let pendingInterval = null;
+let pendingEventSource = null;
+
+function startPending() {
+  entityOrder = PREVIEW_ENTITY_IDS;
+  entityMeta = PREVIEW_ENTITY_META;
+  states = {};
+  for (const eid of entityOrder) {
+    states[eid] = {
+      entity_id: eid,
+      state: PREVIEW_STATES[eid.split('.')[0]] || 'unavailable',
+      attributes: { friendly_name: previewName(eid) },
+    };
+  }
+  renderAll();
+
+  const container = document.getElementById('cards-container');
+  container.classList.add('opacity-50', 'grayscale', 'pointer-events-none', 'select-none', 'pb-24');
+  // Scoped to the cards, not the page: the theme switcher in the header is
+  // still the guest's to use while they wait.
+  container.querySelectorAll('button, input, select').forEach(el => el.disabled = true);
+
+  // A guest days out wants the date, not a five-digit counter; both are shown.
+  document.getElementById('pending-when').textContent =
+    new Date(STARTS_AT * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  updatePendingTimer();
+  pendingInterval = setInterval(updatePendingTimer, 1000);
+  connectPendingSSE();
+}
+
+function updatePendingTimer() {
+  const remaining = STARTS_AT - (Date.now() / 1000 + CLOCK_OFFSET);
+  if (remaining <= 0) { activatePending(); return; }
+  const d = Math.floor(remaining / 86400);
+  const h = Math.floor((remaining % 86400) / 3600);
+  const m = Math.floor((remaining % 3600) / 60);
+  const s = Math.floor(remaining % 60);
+  document.getElementById('pending-timer').textContent =
+    `${d ? d + 'd ' : ''}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// Reload rather than bring the page to life in place. The server is the only
+// thing that knows whether the window has opened, and a reload re-runs every
+// gate, records the page_load the preview deliberately skipped, and emits the
+// server-rendered blocks — the proximity one among them — that a pending page
+// is never served. It also makes preview placeholders surviving into a
+// live session impossible by construction. If the clock was somehow still
+// early, the reload lands back on the preview and the countdown resumes.
+function activatePending() {
+  clearInterval(pendingInterval);
+  if (pendingEventSource) { pendingEventSource.close(); pendingEventSource = null; }
+  location.reload();
+}
+
+// Lifecycle events only — there is no state_change listener here, and the
+// server does not send one to a pending stream either. The connection exists
+// to catch an admin's "Activate Now", and to catch a start time that arrived
+// while this tab was asleep and its own timer never fired: the push is sitting
+// on the socket when it wakes, and a tab that was offline long enough to drop
+// the socket reconnects into a stream that is no longer pending.
+function connectPendingSSE() {
+  pendingEventSource = new EventSource(`${BASE}/g/${SLUG}/stream`);
+  pendingEventSource.addEventListener('token_activated', activatePending);
+  pendingEventSource.addEventListener('token_expired', () => {
+    pendingEventSource.close();
+    pendingEventSource = null;
+    showExpired();
+  });
 }
 
 // ── SSE ──────────────────────────────────────────────────────────────
@@ -1869,7 +1995,10 @@ if ('serviceWorker' in navigator) {
   if (!('{{ base_path }}')) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
 }
 
-init();
+// One entry point, chosen once: a pending page runs the preview and nothing
+// else, so there is no path on which both a preview stream and a live one are
+// opened for the same load.
+if (PENDING) startPending(); else init();
 showInstallBanner();
 </script>
 {% endblock %}

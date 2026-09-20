@@ -130,6 +130,12 @@ class TokenCreateRequest(BaseModel):
     slug: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,64}$")
     entity_ids: list[str] = Field(..., min_length=1)
     expires_in_seconds: int = Field(..., gt=0)
+    # Epoch seconds the link starts working, or None for "right away". Capped
+    # below the never-expires sentinel because a start beyond the end of every
+    # expiry the app can express is not a schedule, it is a typo. A value in
+    # the past is normalised to None by the router rather than rejected — the
+    # admin asked for access now, and that is what it means.
+    starts_at: int | None = Field(default=None, gt=0, lt=NEVER_EXPIRES_SECONDS)
     ip_allowlist: list[str] | None = None
     entity_meta: dict[str, dict[str, Any]] | None = None
     # Deliberately unconstrained here and validated in the router instead: a
@@ -222,6 +228,7 @@ class TokenResponse(BaseModel):
     slug: str
     label: str
     created_at: int
+    starts_at: int | None
     expires_at: int
     revoked: bool
     last_accessed: int | None

@@ -112,7 +112,14 @@ PIN_ATTEMPT_LIMITS_PER_TOKEN = ((60.0, 15), (3600.0, 100))
 _CAMERA_ENTITY_RE = re.compile(r"^camera\.[a-z0-9_]+$")
 
 # L-8: Whitelist of allowed SSE event types
-_ALLOWED_SSE_EVENTS = {"state_change", "token_expired", "reconnected"}
+_ALLOWED_SSE_EVENTS = {"state_change", "token_expired", "token_activated", "reconnected"}
+
+# The subset a stream opened before a token's start time may forward. Neither
+# member carries device data: one says the link is now live, the other says it
+# is gone. state_change and reconnected are deliberately absent — a pending
+# guest must not receive real Home Assistant state, and filtering here means
+# the frames are never serialised rather than merely ignored by the page.
+_PENDING_SSE_EVENTS = {"token_expired", "token_activated"}
 
 # M-27: Simple TTL cache for HA state list
 _states_cache: list[dict] | None = None
@@ -249,7 +256,42 @@ def _pin_cookie_path(request: Request, slug: str) -> str:
     return f"{request.state.ingress_path}/g/{slug}"
 
 
-async def _validate_token(slug: str, request: Request):
+def _is_pending(row) -> bool:
+    """True while a scheduled token's start time is still ahead of us.
+
+    NULL starts_at is the ordinary case and returns False without arithmetic,
+    so nothing about an unscheduled token changes.
+    """
+    starts_at = row["starts_at"]
+    return bool(starts_at) and starts_at > int(time.time())
+
+
+def _refuse_pending(row) -> None:
+    """Refuse a request that arrived before the token's start time.
+
+    403 rather than 410: the link is valid, it is simply not yet in its window,
+    and 410 would tell a guest who opened it early that their link is dead.
+
+    starts_at rides along in the body because the caller has already cleared
+    every gate that protects it — the IP allowlist and, where one is set, the
+    PIN — and the page they were served states the same time in its banner. It
+    is what lets a tab whose own clock ran fast resynchronise instead of
+    dropping into a generic error.
+
+    Deliberately not metered. The proximity refusal budget exists because that
+    refusal is an oracle over the home's coordinates and costs an upstream zone
+    read; this one is a comparison against a row already in hand, and repeating
+    it reveals nothing the banner did not. A budget here would also misfire at
+    exactly the wrong moment: a tab that retried while waiting would be sitting
+    in a 429 at the instant its access opened.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": "This link is not active yet", "starts_at": row["starts_at"]},
+    )
+
+
+async def _validate_token(slug: str, request: Request, allow_pending: bool = False):
     """Load and validate a token by slug. Raises HTTP 410 on any issue.
 
     The PIN gate lives here rather than in each handler so every guest endpoint
@@ -257,6 +299,18 @@ async def _validate_token(slug: str, request: Request):
     later. Gating only the HTML page would leave /state, /stream, /command and
     both camera endpoints reachable with nothing but the slug — the camera pair
     being the worst of it, since those relay live frames.
+
+    The scheduled-start gate sits here for the same reason and defaults closed:
+    a pending token is not an active token, so a route added later is refused
+    before its start time unless it opts out. /stream is the one that does —
+    it is the channel the activation push travels on, and it forwards nothing
+    but lifecycle events while pending.
+
+    Order matters. The PIN is checked first, so a locked token that is also
+    scheduled answers "PIN required" and never "starts Tuesday": the pending
+    preview names every entity on the link, and that is not something to hand
+    to someone who has not proved the PIN. Revocation and expiry come before
+    both — a dead token is dead whatever its schedule said.
     """
     row = await db.get_token_by_slug(slug)
     if not row:
@@ -270,6 +324,9 @@ async def _validate_token(slug: str, request: Request):
 
     if not _pin_gate_ok(row, request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="PIN required")
+
+    if not allow_pending and _is_pending(row):
+        _refuse_pending(row)
 
     return row
 
@@ -461,14 +518,21 @@ async def guest_pwa(background_tasks: BackgroundTasks, request: Request, slug: s
         ctx.update({"slug": slug, "contact_message": settings.contact_message})
         return templates.TemplateResponse(request, "pin_entry.html", ctx)
 
-    await db.touch_token(row["id"])
-    await db.log_access(
-        token_id=row["id"],
-        event_type="page_load",
-        ip_address=_client_ip(request),
-        user_agent=request.headers.get("User-Agent"),
-    )
-    _schedule_page_load_activity(background_tasks, row)
+    # A visit before the window opens is not an access: nothing is touched,
+    # logged, or reported to HA, the same way an unanswered PIN prompt is not.
+    # The guest gets the shape of their page and a countdown, and the real
+    # page_load lands when the link activates and the tab reloads into it.
+    pending = _is_pending(row)
+    if not pending:
+        await db.touch_token(row["id"])
+        await db.log_access(
+            token_id=row["id"],
+            event_type="page_load",
+            ip_address=_client_ip(request),
+            user_agent=request.headers.get("User-Agent"),
+        )
+        _schedule_page_load_activity(background_tasks, row)
+
     ctx = base_context(request)
     ctx.update({
         "slug": slug,
@@ -479,7 +543,23 @@ async def guest_pwa(background_tasks: BackgroundTasks, request: Request, slug: s
         # Decided here, not in the browser: the template only emits the
         # geolocation block when this is true, so a token with nothing gated
         # renders a page that never mentions the API and can never prompt.
-        "requires_location": bool(await db.get_proximity_entity_ids(row["id"])),
+        # A pending page is always false — it can command nothing, so it has no
+        # business asking anyone where they are.
+        "requires_location": (
+            False if pending else bool(await db.get_proximity_entity_ids(row["id"]))
+        ),
+        "pending": pending,
+        "starts_at": row["starts_at"] if pending else None,
+        # The countdown is measured against this rather than the device clock,
+        # so a phone whose time is minutes out still unlocks when the server
+        # says so instead of reloading early into another refusal.
+        "server_now": int(time.time()),
+        # The preview is built from these two and nothing else. Entity IDs give
+        # the domains, and so the icons, grouping and order; the overrides give
+        # the names the admin chose. No Home Assistant state is read here, and
+        # none is reachable from the page until it reloads as an active one.
+        "preview_entity_ids": await db.get_token_entities(row["id"]) if pending else [],
+        "preview_entity_meta": await db.get_token_entity_meta(row["id"]) if pending else {},
     })
     return templates.TemplateResponse(request, "guest_pwa.html", ctx)
 
@@ -642,7 +722,20 @@ async def guest_state(request: Request, slug: str = Path(max_length=64)):
 # SSE stream
 # ---------------------------------------------------------------------------
 
-async def _event_generator(token_id: str, slug: str, request: Request) -> AsyncIterator[str]:
+async def _event_generator(
+    token_id: str, slug: str, request: Request, starts_at: int | None = None
+) -> AsyncIterator[str]:
+    """Relay a token's events to one guest tab.
+
+    `starts_at` is set only when the stream was opened before the token's start
+    time. Until that moment passes the generator forwards the lifecycle subset
+    and nothing else, so no device state leaves the server — and it watches the
+    clock itself, emitting token_activated when the boundary arrives. That is
+    what unlocks a tab whose own timer never fired because the device was asleep
+    or offline across it: the push is waiting on the socket when it wakes, and a
+    tab that missed the socket entirely reconnects into a stream that is no
+    longer pending.
+    """
     q = await ha_client.subscribe(token_id)
     try:
         # M-5: Expose WS health in SSE connected event
@@ -652,16 +745,29 @@ async def _event_generator(token_id: str, slug: str, request: Request) -> AsyncI
             if await request.is_disconnected():
                 break
 
+            timeout = SSE_KEEPALIVE_SECONDS
+            if starts_at is not None:
+                remaining = starts_at - time.time()
+                if remaining <= 0:
+                    yield 'event: token_activated\ndata: {"type": "token_activated"}\n\n'
+                    break
+                timeout = min(timeout, remaining)
+
             try:
-                event = await asyncio.wait_for(q.get(), timeout=SSE_KEEPALIVE_SECONDS)
+                event = await asyncio.wait_for(q.get(), timeout=timeout)
                 # L-8: Only forward whitelisted event types
-                if event["type"] not in _ALLOWED_SSE_EVENTS:
+                allowed = _PENDING_SSE_EVENTS if starts_at is not None else _ALLOWED_SSE_EVENTS
+                if event["type"] not in allowed:
                     continue
                 yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
-                if event["type"] == "token_expired":
+                if event["type"] in ("token_expired", "token_activated"):
                     break
             except asyncio.TimeoutError:
-                yield ": keepalive\n\n"
+                # A pending stream reaching its start time lands here, and the
+                # check at the top of the next pass is what turns it into the
+                # activation push.
+                if starts_at is None or starts_at - time.time() > 0:
+                    yield ": keepalive\n\n"
 
     finally:
         await ha_client.unsubscribe(token_id, q)
@@ -669,9 +775,12 @@ async def _event_generator(token_id: str, slug: str, request: Request) -> AsyncI
 
 @router.get("/{slug}/stream")
 async def guest_stream(request: Request, slug: str = Path(max_length=64)):
-    row = await _validate_token(slug, request)
+    # The one guest route a pending token may hold open. It carries no device
+    # data before the start time — see _event_generator — and it is how an
+    # "Activate Now" reaches a tab that is already sitting on the countdown.
+    row = await _validate_token(slug, request, allow_pending=True)
     return StreamingResponse(
-        _event_generator(row["id"], slug, request),
+        _event_generator(row["id"], slug, request, row["starts_at"] if _is_pending(row) else None),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

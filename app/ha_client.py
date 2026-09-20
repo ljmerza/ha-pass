@@ -156,6 +156,24 @@ async def broadcast_token_expired(token_id: str) -> None:
             pass
 
 
+async def broadcast_token_activated(token_id: str) -> None:
+    """Push token_activated to all SSE connections for a token.
+
+    Sent when an admin drops a scheduled token's remaining delay. A guest tab
+    already sitting on the pending countdown would otherwise wait out a start
+    time that no longer applies; this is what tells it to reload into the live
+    page instead.
+    """
+    event = {"type": "token_activated"}
+    async with _sub_lock:
+        queues = set(_subscriptions.get(token_id, set()))
+    for q in queues:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # REST helpers (M-4: retry on transient HTTP errors)
 # ---------------------------------------------------------------------------

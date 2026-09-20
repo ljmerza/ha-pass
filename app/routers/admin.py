@@ -98,6 +98,38 @@ def _generate_slug() -> str:
     return secrets.token_hex(16)
 
 
+def _normalise_starts_at(starts_at: int | None) -> int | None:
+    """A scheduled start, or None when there is nothing to wait for.
+
+    A start already in the past is "active now", which is what None means, so
+    it is folded rather than stored. That keeps every pending test in the app a
+    single `starts_at > now` comparison with no second case for a stale value.
+    """
+    if starts_at is None or starts_at <= int(time.time()):
+        return None
+    return starts_at
+
+
+def _expires_at_from(expires_in_seconds: int, starts_at: int | None) -> int:
+    """Turn a requested validity into an absolute expiry.
+
+    NEVER_EXPIRES_SECONDS is an absolute sentinel (2099), not a duration, and
+    every "no expiration" test in the app compares against it exactly — so it
+    is returned untouched rather than added to anything.
+
+    Anything else is a duration, and it is measured from the moment the guest
+    can first use the link, not from the moment the admin pressed Create. A
+    3-day token minted a week before check-in has to be three days of access;
+    anchoring it to creation would expire it four days before the guest
+    arrived, which is the whole reason a scheduled start needed one.
+    """
+    if expires_in_seconds == NEVER_EXPIRES_SECONDS:
+        return NEVER_EXPIRES_SECONDS
+    now = int(time.time())
+    anchor = starts_at if starts_at and starts_at > now else now
+    return anchor + expires_in_seconds
+
+
 def _row_to_response(row: Any, entity_ids: list[str] | None = None,
                      entity_meta: dict[str, dict[str, Any]] | None = None) -> dict:
     ip_raw = row["ip_allowlist"]
@@ -113,6 +145,10 @@ def _row_to_response(row: Any, entity_ids: list[str] | None = None,
         "slug": row["slug"],
         "label": row["label"],
         "created_at": row["created_at"],
+        # None on every token that starts immediately, which is all of them
+        # unless an admin scheduled one. The dashboard reads it to decide
+        # whether a card is Scheduled rather than Active.
+        "starts_at": row["starts_at"],
         "expires_at": row["expires_at"],
         "revoked": bool(row["revoked"]),
         "last_accessed": row["last_accessed"],
@@ -170,10 +206,8 @@ async def create_token(
                 )
 
     slug = body.slug or _generate_slug()
-    if body.expires_in_seconds == NEVER_EXPIRES_SECONDS:
-        expires_at = NEVER_EXPIRES_SECONDS
-    else:
-        expires_at = int(time.time()) + body.expires_in_seconds
+    starts_at = _normalise_starts_at(body.starts_at)
+    expires_at = _expires_at_from(body.expires_in_seconds, starts_at)
 
     # Ensure slug uniqueness
     existing = await db.get_token_by_slug(slug)
@@ -191,6 +225,7 @@ async def create_token(
         ip_allowlist=body.ip_allowlist,
         entity_meta=_clean_entity_meta(body.entity_meta),
         pin_hash=await _hash_pin_or_none(body.pin),
+        starts_at=starts_at,
     )
     entity_ids = await db.get_token_entities(row["id"])
     return _row_to_response(row, entity_ids)
@@ -332,10 +367,11 @@ async def update_token_expiry(
     row = await db.get_token_by_id(token_id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    if body.expires_in_seconds == NEVER_EXPIRES_SECONDS:
-        new_expires = NEVER_EXPIRES_SECONDS
-    else:
-        new_expires = int(time.time()) + body.expires_in_seconds
+    # Same anchor as creation: extending a token that has not started yet buys
+    # the guest that much access, measured from their check-in. Anchoring to
+    # now instead would hand a still-pending token an expiry it might already
+    # have passed by the time the link began working.
+    new_expires = _expires_at_from(body.expires_in_seconds, row["starts_at"])
     await db.update_token_expiry(token_id, new_expires)
     # Un-revoke if the token was revoked (admin is explicitly renewing it)
     if row["revoked"]:
@@ -374,6 +410,44 @@ async def revoke_token(token_id: str, _: str = Depends(require_admin)) -> dict:
     if not row["revoked"]:
         await ha_client.broadcast_token_expired(token_id)
     return {"ok": True}
+
+
+@router.post("/tokens/{token_id}/activate")
+async def activate_token(token_id: str, _: str = Depends(require_admin)) -> dict:
+    """Drop a scheduled token's remaining delay so its link works right now.
+
+    POST, like revoke and rotate — it changes state and is not idempotent.
+
+    The expiry is left exactly where it is. It was anchored to the start the
+    admin picked, and that end is a calendar fact — a check-out time, say — not
+    a duration owed from the moment this was pressed. Starting early lengthens
+    the window; it does not slide it.
+
+    A revoked token is refused rather than quietly brought back: revoking is the
+    stronger statement of the two, and Renew already exists for undoing it.
+    """
+    row = await db.get_token_by_id(token_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if row["revoked"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot activate a revoked token",
+        )
+    if not row["starts_at"] or row["starts_at"] <= int(time.time()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This token is not scheduled — it is already active",
+        )
+
+    await db.activate_token_now(token_id)
+    # A guest tab sitting on the countdown has no reason to look again until
+    # the start time it was told about, so push. Its stream is the one guest
+    # connection a pending token is allowed to hold, and this is what it holds
+    # it for.
+    await ha_client.broadcast_token_activated(token_id)
+    row = await db.get_token_by_id(token_id)
+    return _row_to_response(row)
 
 
 @router.post("/tokens/{token_id}/rotate-slug")
