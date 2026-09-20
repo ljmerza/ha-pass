@@ -328,6 +328,19 @@ async def unrevoke_token(token_id: str) -> None:
     await db.commit()
 
 
+async def rotate_token_slug(token_id: str, new_slug: str) -> None:
+    """Swap in a new slug. The old link stops resolving the moment this commits.
+
+    Everything else stays put — entities and their overrides, expiry, the PIN
+    hash, and the access_log rows, which are keyed on token id and so are not
+    touched by a slug write at all. This is for handing the same configuration
+    to a new guest, not for building a second token.
+    """
+    db = await get_db()
+    await db.execute("UPDATE tokens SET slug = ? WHERE id = ?", (new_slug, token_id))
+    await db.commit()
+
+
 async def delete_token(token_id: str) -> None:
     db = await get_db()
     # Nullify access_log references before deleting to avoid FK constraint
@@ -394,4 +407,72 @@ async def cleanup_old_data(retention_days: int) -> None:
     cutoff = now - (retention_days * 86400)
     await db.execute("DELETE FROM access_log WHERE timestamp < ?", (cutoff,))
     await db.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (now,))
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Entity templates
+# ---------------------------------------------------------------------------
+# A saved, named entity selection the picker can replay into a later token.
+# Entity IDs only — see migration 007 for why the per-entity overrides that
+# token_entities carries deliberately stay with the token.
+
+def _row_to_template(row: aiosqlite.Row) -> dict[str, Any]:
+    try:
+        entity_ids = json.loads(row["entity_ids"])
+    except (ValueError, TypeError):
+        entity_ids = []
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "entity_ids": entity_ids if isinstance(entity_ids, list) else [],
+        "created_at": row["created_at"],
+    }
+
+
+async def create_entity_template(name: str, entity_ids: list[str]) -> dict[str, Any]:
+    db = await get_db()
+    template_id = str(uuid.uuid4())
+    now = int(time.time())
+    # Deduplicate entity IDs, same as create_token does.
+    entity_ids = list(dict.fromkeys(entity_ids))
+    await db.execute(
+        "INSERT INTO entity_templates (id, name, entity_ids, created_at) VALUES (?, ?, ?, ?)",
+        (template_id, name, json.dumps(entity_ids), now),
+    )
+    await db.commit()
+    return await get_entity_template(template_id)  # type: ignore[return-value]
+
+
+async def list_entity_templates() -> list[dict[str, Any]]:
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM entity_templates ORDER BY name COLLATE NOCASE"
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_template(r) for r in rows]
+
+
+async def get_entity_template(template_id: str) -> dict[str, Any] | None:
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM entity_templates WHERE id = ?", (template_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return _row_to_template(row) if row else None
+
+
+async def get_entity_template_by_name(name: str) -> dict[str, Any] | None:
+    """Look a template up by name. The column is COLLATE NOCASE, so is this."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM entity_templates WHERE name = ?", (name,)
+    ) as cur:
+        row = await cur.fetchone()
+    return _row_to_template(row) if row else None
+
+
+async def delete_entity_template(template_id: str) -> None:
+    db = await get_db()
+    await db.execute("DELETE FROM entity_templates WHERE id = ?", (template_id,))
     await db.commit()

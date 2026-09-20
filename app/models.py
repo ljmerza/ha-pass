@@ -171,6 +171,29 @@ class TokenUpdateExpiryRequest(BaseModel):
     expires_in_seconds: int = Field(..., gt=0)
 
 
+# Template names come from the admin and are rendered back into the picker, so
+# they are capped here and escaped at render, same as DISPLAY_NAME_MAX. 64 is
+# deliberately short: this is a chip label, not a description.
+TEMPLATE_NAME_MAX = 64
+
+
+class EntityTemplateCreateRequest(BaseModel):
+    """Save the picker's current selection under a name.
+
+    Entity IDs only. A template answers "which entities"; the per-entity
+    presentation and proximity overrides stay on the token that uses it.
+    """
+    name: str = Field(..., min_length=1, max_length=TEMPLATE_NAME_MAX)
+    entity_ids: list[str] = Field(..., min_length=1)
+
+
+class EntityTemplateResponse(BaseModel):
+    id: str
+    name: str
+    entity_ids: list[str]
+    created_at: int
+
+
 class GuestLocation(BaseModel):
     """Where the guest's browser says it is, for a proximity-gated command.
 

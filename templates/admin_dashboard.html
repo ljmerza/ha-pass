@@ -266,6 +266,32 @@
   </div>
 </div>
 
+<!-- Save Entity Template Modal -->
+<!-- z-[60] like the entity modal: it opens on top of the create/edit modal the
+     picker lives in, which sits at z-50. -->
+<div class="fixed inset-0 z-[60] hidden items-center justify-center p-4 bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="template-modal">
+  <div class="modal-animate bg-surface-light dark:bg-surface-dark border border-border-light dark:border-border-dark rounded-2xl p-6 w-full max-w-sm shadow-xl" role="dialog" aria-modal="true" aria-labelledby="template-modal-title">
+    <div class="flex items-center justify-between mb-3">
+      <h2 id="template-modal-title" class="text-lg font-serif">Save Entity Template</h2>
+      <button data-action="close-modal" data-modal="template" aria-label="Close dialog" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-soot/5 dark:hover:bg-white/5 text-muted transition-colors">
+        <span aria-hidden="true" class="material-symbols-outlined text-xl">close</span>
+      </button>
+    </div>
+    <div id="template-modal-count" class="text-sm text-muted mb-4"></div>
+
+    <label class="block text-xs font-display font-semibold mb-1.5" for="template-name">Name</label>
+    <input id="template-name" type="text" maxlength="64" placeholder="e.g. Ground floor"
+      class="w-full px-3 py-2.5 rounded-xl border border-border-light dark:border-border-dark bg-bg-light dark:bg-bg-dark text-sm outline-none focus:border-primary">
+    <p class="text-[11px] text-muted mt-1.5">Saves which entities are selected, nothing else — display names, light options and the location requirement stay with the token they were set on. Loading a template later <span class="font-medium">adds</span> its entities to whatever is already selected.</p>
+
+    <div id="template-error" role="alert" class="text-primary text-xs min-h-[18px] mt-2"></div>
+    <div class="flex justify-end gap-2 mt-3 pt-4 border-t border-border-light dark:border-border-dark">
+      <button data-action="close-modal" data-modal="template" class="px-4 py-2 text-sm font-display font-medium rounded-xl border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
+      <button data-action="submit-template" class="px-4 py-2 text-sm font-display font-semibold rounded-xl bg-primary hover:bg-primary-hover text-white transition-colors">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Edit Entities Modal -->
 <div class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="edit-modal">
   <div class="modal-animate bg-surface-light dark:bg-surface-dark border border-border-light dark:border-border-dark rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-xl" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
@@ -400,14 +426,22 @@ function guestLink(slug) {
   return `${location.origin}/g/${slug}`;
 }
 let allEntities = [];
+// HA's label catalogue, and whether this deployment can read labels at all.
+// False means the registry is unreadable (HA too old, token without the
+// scope) — the picker hides its label filter rather than showing an empty one.
+let allLabels = [];
+let labelsAvailable = false;
+let entityTemplates = [];
 let tokens = [];
 let activity = [];
 let activityExpanded = false;
 const ACTIVITY_COLLAPSED_COUNT = 3;
 
 // Picker state (separate for create vs edit)
-let createPicker = { selected: new Set(), filter: 'all', search: '', meta: {} };
-let editPicker = { selected: new Set(), filter: 'all', search: '', meta: {} };
+let createPicker = { selected: new Set(), filter: 'all', label: '', search: '', meta: {} };
+let editPicker = { selected: new Set(), filter: 'all', label: '', search: '', meta: {} };
+// Which picker the save-template modal is reading its selection from.
+let templateModalContainer = null;
 // Which picker + entity the entity-settings modal is currently editing.
 let entityModalCtx = { containerId: null, entityId: null };
 let editTokenId = null;
@@ -460,6 +494,7 @@ function showApp() {
   loadTokens();
   loadActivity();
   loadEntities();
+  loadTemplates();
   startAutoRefresh();
   requestAnimationFrame(updateThemeToggles);
 }
@@ -697,10 +732,16 @@ function renderTokens() {
             <span aria-hidden="true" class="material-symbols-outlined text-sm">block</span> Revoke
           </button>
         </div>
-        <button data-id="${esc(t.id)}" data-label="${esc(t.label)}" data-action="open-pin-modal"
-          class="w-full mt-2 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium border transition-colors ${t.has_pin ? 'border-ink/30 text-ink bg-ink/10 hover:bg-ink/20' : 'border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5'}">
-          <span aria-hidden="true" class="material-symbols-outlined text-sm">${t.has_pin ? 'lock' : 'lock_open'}</span> ${t.has_pin ? 'PIN Protected' : 'Add PIN'}
-        </button>
+        <div class="grid grid-cols-2 gap-2 mt-2">
+          <button data-id="${esc(t.id)}" data-action="confirm-rotate"
+            class="flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors" title="Issue a new link and retire this one">
+            <span aria-hidden="true" class="material-symbols-outlined text-sm">autorenew</span> Rotate Link
+          </button>
+          <button data-id="${esc(t.id)}" data-label="${esc(t.label)}" data-action="open-pin-modal"
+            class="flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium border transition-colors ${t.has_pin ? 'border-ink/30 text-ink bg-ink/10 hover:bg-ink/20' : 'border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5'}">
+            <span aria-hidden="true" class="material-symbols-outlined text-sm">${t.has_pin ? 'lock' : 'lock_open'}</span> ${t.has_pin ? 'PIN Protected' : 'Add PIN'}
+          </button>
+        </div>
       </div>
     </div></li>`;
   }).join('');
@@ -708,8 +749,32 @@ function renderTokens() {
 
 // ── Entity Loading ────────────────────────────────────────────────────
 async function loadEntities() {
-  const r = await fetch(`${BASE}/admin/ha/entities`);
-  if (r.ok) allEntities = await r.json();
+  const r = await fetch(`${BASE}/admin/ha/entities?include_labels=true`);
+  if (!r.ok) return;
+  const data = await r.json();
+  // Two shapes: the enveloped one include_labels asks for, and the bare array
+  // the endpoint still returns without it. Tolerating both keeps the picker
+  // working against a server that has not learned about labels.
+  if (Array.isArray(data)) {
+    allEntities = data;
+    allLabels = [];
+    labelsAvailable = false;
+    return;
+  }
+  allEntities = data.entities || [];
+  labelsAvailable = !!data.labels_available;
+  // Entities carry label IDs, so the catalogue is what turns them into names.
+  // Only labels something on this list actually wears get a chip — a label used
+  // solely on areas or devices would otherwise filter to nothing.
+  const inUse = new Set();
+  allEntities.forEach(e => (e.labels || []).forEach(id => inUse.add(id)));
+  allLabels = (data.labels || []).filter(l => inUse.has(l.label_id));
+}
+
+// ── Entity Templates ──────────────────────────────────────────────────
+async function loadTemplates() {
+  const r = await fetch(`${BASE}/admin/templates`);
+  if (r.ok) entityTemplates = await r.json();
 }
 
 // Domains a guest can only look at. Nothing to gate on these: cameras and
@@ -736,13 +801,13 @@ function pickerLabel(e, pickerState) {
   return (pickerState.meta[e.entity_id] || {}).display_name || e.friendly_name || e.entity_id;
 }
 
-function renderPicker(containerId, pickerState) {
-  const container = document.getElementById(containerId);
-  const byLabel = (a, b) =>
-    pickerLabel(a, pickerState).localeCompare(pickerLabel(b, pickerState), undefined, { sensitivity: 'base' });
-
-  const filtered = allEntities.filter(e => {
+// The three filters intersect rather than override: a domain chip, an HA label
+// chip and the search box each narrow the same list, so "lights, tagged Guest,
+// matching bed" is expressible and none of them silently clears another.
+function pickerFiltered(pickerState) {
+  return allEntities.filter(e => {
     if (pickerState.filter !== 'all' && pickerGroup(e.domain) !== pickerGroup(pickerState.filter)) return false;
+    if (pickerState.label && !(e.labels || []).includes(pickerState.label)) return false;
     if (pickerState.search) {
       const q = pickerState.search.toLowerCase();
       const hay = [e.entity_id, e.friendly_name || '', pickerLabel(e, pickerState)];
@@ -750,6 +815,25 @@ function renderPicker(containerId, pickerState) {
     }
     return true;
   });
+}
+
+// HA label colours are free-form strings. Only a hex value is emitted, and as
+// an inline style: Tailwind compiles the classes it can see in the source and
+// would never have a class for a colour that arrives at runtime.
+function labelSwatchStyle(color) {
+  return /^#[0-9a-f]{3,8}$/i.test(color || '') ? ` style="background-color:${color}"` : '';
+}
+
+function renderPicker(containerId, pickerState) {
+  const container = document.getElementById(containerId);
+  const byLabel = (a, b) =>
+    pickerLabel(a, pickerState).localeCompare(pickerLabel(b, pickerState), undefined, { sensitivity: 'base' });
+
+  const filtered = pickerFiltered(pickerState);
+  // "Add all" only appears once something is narrowing the list. Unfiltered it
+  // would mean "put every entity in Home Assistant on this token", which is
+  // never what the button is for.
+  const narrowed = pickerState.filter !== 'all' || !!pickerState.label || !!pickerState.search;
 
   // Both lists honour the filter. Previously only Available did, so searching
   // left the Selected list showing everything.
@@ -758,6 +842,42 @@ function renderPicker(containerId, pickerState) {
   const allSelected = allEntities.filter(e => pickerState.selected.has(e.entity_id));
 
   container.innerHTML = `
+    <div class="mb-3">
+      <div class="flex items-center justify-between mb-1.5 px-1">
+        <span class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted">Templates</span>
+        <button type="button" data-action="open-template-modal" data-container="${containerId}"
+          class="inline-flex items-center gap-1 text-[11px] font-display font-medium text-accent hover:underline">
+          <span aria-hidden="true" class="material-symbols-outlined text-sm">bookmark_add</span> Save selection
+        </button>
+      </div>
+      ${entityTemplates.length ? `<div class="flex flex-wrap gap-1.5">
+        ${entityTemplates.map(t => `<span role="button" tabindex="0" data-action="template-load" data-container="${containerId}" data-template="${esc(t.id)}"
+          title="Add ${esc(String(t.entity_ids.length))} ${t.entity_ids.length === 1 ? 'entity' : 'entities'} to the selection"
+          class="inline-flex items-center gap-1 pl-3 pr-1 py-1 rounded-full text-xs font-display font-medium border border-border-light dark:border-border-dark text-muted hover:border-accent dark:hover:border-accent cursor-pointer transition-colors">
+          <span aria-hidden="true" class="material-symbols-outlined text-sm">bookmark</span>
+          ${esc(t.name)} <span class="font-mono text-[10px] opacity-60">${esc(String(t.entity_ids.length))}</span>
+          <button type="button" data-action="template-delete" data-template="${esc(t.id)}" data-name="${esc(t.name)}"
+            aria-label="Delete template ${esc(t.name)}"
+            class="w-5 h-5 flex items-center justify-center rounded-full hover:bg-primary/10 text-primary transition-colors">
+            <span aria-hidden="true" class="material-symbols-outlined" style="font-size:14px">close</span>
+          </button>
+        </span>`).join('')}
+      </div>` : `<p class="text-[11px] text-muted px-1">No saved templates yet. Pick some entities, then Save selection.</p>`}
+    </div>
+    ${labelsAvailable && allLabels.length ? `
+    <div class="mb-3">
+      <div class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted mb-1.5 px-1">Labels</div>
+      <div class="flex flex-wrap gap-1.5">
+        ${[{ label_id: '', name: 'All labels' }, ...allLabels].map(l => `<button type="button" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-display font-medium border transition-colors
+          ${pickerState.label === l.label_id
+            ? 'bg-accent text-white border-accent'
+            : 'border-border-light dark:border-border-dark text-muted hover:border-accent dark:hover:border-accent'}"
+          data-action="picker-label" data-container="${containerId}" data-label="${esc(l.label_id)}">
+          ${l.label_id ? `<span aria-hidden="true" class="w-2 h-2 rounded-full bg-accent"${labelSwatchStyle(l.color)}></span>` : '<span aria-hidden="true" class="material-symbols-outlined text-sm">label</span>'}
+          ${esc(l.name)}
+        </button>`).join('')}
+      </div>
+    </div>` : ''}
     <div class="flex flex-wrap gap-1.5 mb-3">
       ${PICKER_DOMAINS.map(d => `<button class="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-display font-medium border transition-colors
         ${pickerState.filter === d
@@ -808,7 +928,13 @@ function renderPicker(containerId, pickerState) {
       </ul>
     </div>` : ''}
     <div class="mb-2">
-      <div class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted mb-1.5 px-1">Available (${available.length})</div>
+      <div class="flex items-center justify-between mb-1.5 px-1">
+        <span class="text-[11px] font-mono font-bold uppercase tracking-wider text-muted">Available (${available.length})</span>
+        ${narrowed && available.length ? `<button type="button" data-action="picker-add-all" data-container="${containerId}"
+          class="inline-flex items-center gap-1 text-[11px] font-display font-medium text-accent hover:underline">
+          <span aria-hidden="true" class="material-symbols-outlined text-sm">library_add</span> Add all ${available.length}
+        </button>` : ''}
+      </div>
       <ul class="picker-list max-h-44 overflow-y-auto border border-border-light dark:border-border-dark rounded-xl bg-surface-light dark:bg-surface-dark list-none" role="list">
         ${available.slice(0, 100).map(e => `<li class="flex items-center gap-3 px-3 py-2.5 border-b border-border-light dark:border-border-dark last:border-b-0 hover:bg-soot/[0.03] dark:hover:bg-white/5 cursor-pointer transition-colors" data-action="picker-add" data-container="${containerId}" data-entity="${esc(e.entity_id)}" role="button" tabindex="0" aria-label="Add ${esc(e.friendly_name || e.entity_id)}">
           <div class="w-7 h-7 rounded-full ${(DOMAIN_COLORS[e.domain]?.icon || 'bg-gray-500')}/20 flex items-center justify-center flex-shrink-0">
@@ -862,9 +988,101 @@ function pickerRemove(containerId, entityId) {
   renderPicker(containerId, getPickerState(containerId));
 }
 
+function setPickerLabel(containerId, labelId) {
+  const pickerState = getPickerState(containerId);
+  // Clicking the active label chip again clears it, so the filter can be
+  // undone without hunting for the "All labels" chip.
+  pickerState.label = pickerState.label === labelId ? '' : labelId;
+  renderPicker(containerId, pickerState);
+}
+
+function pickerAddAll(containerId) {
+  const pickerState = getPickerState(containerId);
+  // The whole filtered set, not the 100 rows the list draws — the cap is a
+  // rendering limit and a bulk add that honoured it would silently miss the
+  // rest of a large label.
+  const toAdd = pickerFiltered(pickerState).filter(e => !pickerState.selected.has(e.entity_id));
+  toAdd.forEach(e => pickerState.selected.add(e.entity_id));
+  renderPicker(containerId, pickerState);
+  if (toAdd.length) showToast(`Added ${toAdd.length} ${toAdd.length === 1 ? 'entity' : 'entities'}`, 'success');
+}
+
+// ── Entity Template Actions ───────────────────────────────────────────
+// Loading is additive on purpose: two templates can be stacked, and an admin
+// part-way through a selection never loses it to a mis-click. The chip title
+// and the save dialog both say so.
+function loadTemplateInto(containerId, templateId) {
+  const tpl = entityTemplates.find(t => t.id === templateId);
+  if (!tpl) return;
+  const pickerState = getPickerState(containerId);
+  const known = new Set(allEntities.map(e => e.entity_id));
+  let added = 0, missing = 0;
+  tpl.entity_ids.forEach(eid => {
+    // An entity renamed or removed in HA since the template was saved would
+    // otherwise be put on a token that can never render or command it.
+    if (!known.has(eid)) { missing++; return; }
+    if (!pickerState.selected.has(eid)) { pickerState.selected.add(eid); added++; }
+  });
+  renderPicker(containerId, pickerState);
+
+  const skipped = missing ? `, ${missing} no longer in Home Assistant` : '';
+  if (added) showToast(`Added ${added} from "${tpl.name}"${skipped}`, 'success');
+  else showToast(`"${tpl.name}" is already selected${skipped}`, missing ? 'error' : 'success');
+}
+
+function openTemplateModal(containerId) {
+  templateModalContainer = containerId;
+  const count = getPickerState(containerId).selected.size;
+  document.getElementById('template-modal-count').textContent =
+    `${count} ${count === 1 ? 'entity' : 'entities'} selected.`;
+  document.getElementById('template-name').value = '';
+  document.getElementById('template-error').textContent = '';
+  openModal('template-modal');
+  document.getElementById('template-name').focus();
+}
+
+function closeTemplateModal() { closeModal('template-modal'); templateModalContainer = null; }
+
+async function submitTemplate() {
+  const containerId = templateModalContainer;
+  const errEl = document.getElementById('template-error');
+  const name = document.getElementById('template-name').value.trim();
+  if (!name) { errEl.textContent = 'Name is required.'; return; }
+  const entityIds = [...getPickerState(containerId).selected];
+  if (!entityIds.length) { errEl.textContent = 'Select at least one entity first.'; return; }
+
+  const r = await fetch(`${BASE}/admin/templates`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name, entity_ids: entityIds }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    errEl.textContent = typeof err.detail === 'string' ? err.detail : 'Error saving template.';
+    return;
+  }
+  closeTemplateModal();
+  await loadTemplates();
+  renderPicker(containerId, getPickerState(containerId));
+  showToast('Template saved', 'success');
+}
+
+function confirmDeleteTemplate(templateId, name) {
+  openConfirmModal('Delete Template', `"${name}" will be removed. Tokens already created from it are unaffected.`, async () => {
+    const r = await fetch(`${BASE}/admin/templates/${templateId}`, { method: 'DELETE' });
+    if (!r.ok) { showToast('Failed to delete template', 'error'); return; }
+    await loadTemplates();
+    // Whichever picker is on screen; both read the same entityTemplates list.
+    ['create-picker', 'edit-picker'].forEach(id => {
+      if (document.getElementById(id).innerHTML) renderPicker(id, getPickerState(id));
+    });
+    showToast('Template deleted', 'success');
+  });
+}
+
 // ── Create Token Modal ────────────────────────────────────────────────
 function openCreateModal(preset = {}) {
-  createPicker = { selected: new Set(preset.entityIds || []), filter: 'all', search: '', meta: {} };
+  createPicker = { selected: new Set(preset.entityIds || []), filter: 'all', label: '', search: '', meta: {} };
   document.getElementById('create-modal-title').textContent = preset.title || 'Create Guest Token';
   document.getElementById('f-label').value = preset.label || '';
   document.getElementById('f-slug').value = '';
@@ -1057,7 +1275,7 @@ async function submitPin() {
 // ── Edit Entities Modal ───────────────────────────────────────────────
 async function openEditModal(tokenId) {
   editTokenId = tokenId;
-  editPicker = { selected: new Set(), filter: 'all', search: '', meta: {} };
+  editPicker = { selected: new Set(), filter: 'all', label: '', search: '', meta: {} };
   document.getElementById('edit-error').textContent = '';
   document.getElementById('edit-token-label').textContent = 'Loading...';
   document.getElementById('edit-picker').innerHTML = '<div class="text-center py-8 text-muted text-sm">Loading entities...</div>';
@@ -1155,6 +1373,18 @@ async function confirmRevoke(id) {
     const r = await fetch(`${BASE}/admin/tokens/${id}/revoke`, {method: 'POST'});
     if (r.ok) { showToast('Token revoked', 'success'); loadTokens(); loadActivity(); }
     else showToast('Error revoking token', 'error');
+  });
+}
+
+async function confirmRotate(id) {
+  openConfirmModal('Rotate Link', 'A new link is generated and the current one stops working immediately. Entities, expiry, PIN and history are kept — a guest with a PIN will be asked for it again.', async () => {
+    const r = await fetch(`${BASE}/admin/tokens/${id}/rotate-slug`, { method: 'POST' });
+    if (!r.ok) { showToast('Failed to rotate link', 'error'); return; }
+    const token = await r.json();
+    loadTokens();
+    loadActivity();
+    showToast('Link rotated — new link copied', 'success');
+    copyUrl(guestLink(token.slug));
   });
 }
 
@@ -1334,6 +1564,7 @@ document.addEventListener('keydown', e => {
     const closers = {
       'qr-modal': closeQrModal,
       'confirm-modal': closeConfirmModal,
+      'template-modal': closeTemplateModal,
       'extend-modal': closeExtendModal,
       'edit-modal': closeEditModal,
       'pin-modal': closePinModal,
@@ -1415,7 +1646,7 @@ document.addEventListener('click', e => {
 
     // Close any modal
     case 'close-modal': {
-      const modalMap = { create: closeCreateModal, edit: closeEditModal, extend: closeExtendModal, confirm: closeConfirmModal, qr: closeQrModal, entity: closeEntityModal, pin: closePinModal };
+      const modalMap = { create: closeCreateModal, edit: closeEditModal, extend: closeExtendModal, confirm: closeConfirmModal, qr: closeQrModal, entity: closeEntityModal, pin: closePinModal, template: closeTemplateModal };
       const closer = modalMap[el.dataset.modal];
       if (closer) closer();
       break;
@@ -1425,6 +1656,7 @@ document.addEventListener('click', e => {
     case 'copy-url': copyUrl(el.dataset.url); break;
     case 'show-qr': showQr(el.dataset.url); break;
     case 'confirm-revoke': confirmRevoke(el.dataset.id); break;
+    case 'confirm-rotate': confirmRotate(el.dataset.id); break;
     case 'confirm-delete': confirmDelete(el.dataset.id); break;
 
     // Entity picker
@@ -1433,6 +1665,16 @@ document.addEventListener('click', e => {
     case 'submit-entity-meta': submitEntityMeta(); break;
     case 'picker-add': pickerAdd(el.dataset.container, el.dataset.entity); break;
     case 'picker-filter': setPickerFilter(el.dataset.container, el.dataset.domain); break;
+    case 'picker-label': setPickerLabel(el.dataset.container, el.dataset.label); break;
+    case 'picker-add-all': pickerAddAll(el.dataset.container); break;
+
+    // Entity templates
+    case 'template-load': loadTemplateInto(el.dataset.container, el.dataset.template); break;
+    // The delete button sits inside the load chip; closest() resolves to the
+    // button, so a delete click never also loads the template.
+    case 'template-delete': confirmDeleteTemplate(el.dataset.template, el.dataset.name); break;
+    case 'open-template-modal': openTemplateModal(el.dataset.container); break;
+    case 'submit-template': submitTemplate(); break;
   }
 });
 

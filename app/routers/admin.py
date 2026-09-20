@@ -18,8 +18,10 @@ from app.models import (
     DISPLAY_NAME_MAX,
     ENTITY_OPTION_KEYS,
     EntityMetaRequest,
+    EntityTemplateCreateRequest,
     NEVER_EXPIRES_SECONDS,
     SUPPORTED_DOMAINS,
+    TEMPLATE_NAME_MAX,
     TokenCreateRequest,
     TokenPinRequest,
     TokenUpdateEntitiesRequest,
@@ -88,6 +90,13 @@ async def logout(response: Response, session_id: str = Depends(require_admin)) -
 # ---------------------------------------------------------------------------
 # Token management
 # ---------------------------------------------------------------------------
+
+# 128 bits of urandom, hex. The slug is the guest's whole credential when no
+# PIN is set, so it is generated here and nowhere else — creation and rotation
+# must not be able to drift apart in how unguessable a link is.
+def _generate_slug() -> str:
+    return secrets.token_hex(16)
+
 
 def _row_to_response(row: Any, entity_ids: list[str] | None = None,
                      entity_meta: dict[str, dict[str, Any]] | None = None) -> dict:
@@ -160,7 +169,7 @@ async def create_token(
                     detail=f"Invalid CIDR: {cidr}",
                 )
 
-    slug = body.slug or secrets.token_hex(16)
+    slug = body.slug or _generate_slug()
     if body.expires_in_seconds == NEVER_EXPIRES_SECONDS:
         expires_at = NEVER_EXPIRES_SECONDS
     else:
@@ -367,6 +376,50 @@ async def revoke_token(token_id: str, _: str = Depends(require_admin)) -> dict:
     return {"ok": True}
 
 
+@router.post("/tokens/{token_id}/rotate-slug")
+async def rotate_token_slug(token_id: str, _: str = Depends(require_admin)) -> dict:
+    """Mint a fresh slug for an existing token, retiring the old link.
+
+    POST, like revoke — this changes state and is not idempotent, and revoke was
+    deliberately moved off DELETE for the same reason.
+
+    The response carries the new link only. The old slug is not echoed back and
+    not logged: it is a credential that has just been retired, and writing it
+    into a response body or a log line would outlive the rotation that was
+    supposed to end it.
+
+    Everything except the slug survives — entities and their overrides, expiry,
+    the PIN, and the access log, which is keyed on token id. One thing does not:
+    a guest holding a PIN session for the old link has to enter the PIN again,
+    because that cookie is scoped Path=/g/<old-slug> and the browser will never
+    send it to the new one. That is the intended outcome — rotation exists to
+    hand the same access to a different person.
+    """
+    row = await db.get_token_by_id(token_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    # 128 bits makes a collision unreachable, but the slug column is UNIQUE and
+    # an insert that lost the lottery would be a 500, so retry rather than trust.
+    for _attempt in range(5):
+        new_slug = _generate_slug()
+        if not await db.get_token_by_slug(new_slug):
+            break
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not generate a unique slug",
+        )
+
+    await db.rotate_token_slug(token_id, new_slug)
+    # An SSE stream opened on the old slug is validated once, at connect, and
+    # then runs until the token expires — so hang it up explicitly. Every other
+    # guest endpoint re-reads the slug per request and is already dead.
+    await ha_client.broadcast_token_expired(token_id)
+    row = await db.get_token_by_id(token_id)
+    return _row_to_response(row)
+
+
 @router.delete("/tokens/{token_id}")
 async def delete_token(token_id: str, _: str = Depends(require_admin)) -> dict:
     row = await db.get_token_by_id(token_id)
@@ -374,6 +427,52 @@ async def delete_token(token_id: str, _: str = Depends(require_admin)) -> dict:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     await ha_client.broadcast_token_expired(token_id)
     await db.delete_token(token_id)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Entity templates
+# ---------------------------------------------------------------------------
+# A named, reusable entity selection for the picker. There is no update side:
+# a template is small enough that re-saving it under the same name after a
+# delete is simpler than an edit flow nobody asked for.
+
+@router.get("/templates")
+async def list_entity_templates(_: str = Depends(require_admin)) -> list[dict]:
+    return await db.list_entity_templates()
+
+
+@router.post("/templates", status_code=status.HTTP_201_CREATED)
+async def create_entity_template(
+    body: EntityTemplateCreateRequest,
+    _: str = Depends(require_admin),
+) -> dict:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Template name is required",
+        )
+    # Trimming can only shorten, so the Field cap already holds — but the check
+    # is here too because the cap is the thing a caller must not be able to slip.
+    if len(name) > TEMPLATE_NAME_MAX:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Template name must be at most {TEMPLATE_NAME_MAX} characters",
+        )
+    if await db.get_entity_template_by_name(name):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Template '{name}' already exists",
+        )
+    return await db.create_entity_template(name, body.entity_ids)
+
+
+@router.delete("/templates/{template_id}")
+async def delete_entity_template(template_id: str, _: str = Depends(require_admin)) -> dict:
+    if not await db.get_entity_template(template_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    await db.delete_entity_template(template_id)
     return {"ok": True}
 
 
