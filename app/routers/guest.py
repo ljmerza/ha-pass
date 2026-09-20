@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 from app import database as db
 from app import guest_pin
 from app import ha_client
+from app import proximity
 from app.config import settings
 from app.context import base_context
 from app.models import (
@@ -71,6 +72,23 @@ CAMERA_SNAPSHOT_RPM = 120
 MAX_STREAMS_PER_TOKEN = 8
 _active_streams: dict[str, int] = {}
 _stream_lock = asyncio.Lock()
+
+# Budget for proximity checks that come back refused, per token, on top of the
+# ordinary command limits above. Two reasons it exists:
+#
+# A refusal is otherwise a free oracle — a caller could binary-search the home
+# coordinates out of the gate by watching which lat/long pairs come back 403.
+# This slows that to a crawl rather than closing it; the position of a house
+# whose guest link you already hold is not a secret worth a tighter cap.
+#
+# And a guest who really is away stops after a handful of taps with "too many
+# location checks" instead of retrying into the main command budget forever.
+#
+# Only refusals are recorded, so a guest who is actually at the property never
+# touches this. Someone holding the slug can exhaust it to keep the real guest
+# out — but they can already exhaust COMMAND_LIMITS and deny every entity on the
+# token, so it is not a new exposure.
+PROXIMITY_FAILURE_LIMITS = ((60.0, 5), (3600.0, 30))
 
 # Brute-force budget for PIN entry, as (window_seconds, max_attempts) pairs.
 # Two keys, both of which an attempt has to pass, because neither alone works:
@@ -205,6 +223,67 @@ async def _validate_token(slug: str, request: Request):
     return row
 
 
+async def _refuse_proximity(token_id: str, status_code: int, detail: str) -> None:
+    """Record a refused proximity check and raise, or raise 429 once it is spent."""
+    if not await rate_limiter.check_multi(f"prox:{token_id}", PROXIMITY_FAILURE_LIMITS):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many location checks — please wait a minute",
+        )
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+async def _enforce_proximity(row, body: CommandRequest) -> None:
+    """Refuse a gated entity's command unless a fresh fix puts the guest at home.
+
+    Only entities the admin marked reach any of this, so an ungated entity on
+    the same token neither needs a location nor waits on one — the lookup is a
+    membership test and returns immediately when nothing is gated.
+
+    Fails closed at every step: no fix, a stale fix, or a zone.home that cannot
+    be read all refuse. A gate that opens when it cannot verify is not a gate,
+    and the cost of the strict side is an admin noticing their door button stops
+    working while HA is unreachable.
+
+    Soft by nature — see app/proximity.py. The coordinates are self-reported, so
+    this is friction for a casual guest, not evidence anyone is at the door.
+    """
+    gated = await db.get_proximity_entity_ids(row["id"])
+    if body.entity_id not in gated:
+        return
+
+    token_id = row["id"]
+    loc = body.location
+    if loc is None:
+        await _refuse_proximity(
+            token_id,
+            status.HTTP_400_BAD_REQUEST,
+            "This control needs your location",
+        )
+
+    if not proximity.fix_is_fresh(loc.timestamp, time.time()):
+        await _refuse_proximity(
+            token_id,
+            status.HTTP_400_BAD_REQUEST,
+            "Your location is out of date — try again",
+        )
+
+    zone = await ha_client.get_home_zone()
+    if zone is None:
+        await _refuse_proximity(
+            token_id,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Can't check your location right now",
+        )
+
+    if not proximity.is_within_zone(loc.latitude, loc.longitude, zone):
+        await _refuse_proximity(
+            token_id,
+            status.HTTP_403_FORBIDDEN,
+            "You need to be at the property to use this",
+        )
+
+
 async def _fire_activity_event(payload: dict) -> None:
     try:
         await ha_client.fire_event(ACTIVITY_EVENT_TYPE, payload)
@@ -313,6 +392,10 @@ async def guest_pwa(background_tasks: BackgroundTasks, request: Request, slug: s
         "expires_at": row["expires_at"],
         "contact_message": settings.contact_message,
         "never_expires": NEVER_EXPIRES_SECONDS,
+        # Decided here, not in the browser: the template only emits the
+        # geolocation block when this is true, so a token with nothing gated
+        # renders a page that never mentions the API and can never prompt.
+        "requires_location": bool(await db.get_proximity_entity_ids(row["id"])),
     })
     return templates.TemplateResponse(request, "guest_pwa.html", ctx)
 
@@ -463,7 +546,10 @@ async def guest_state(request: Request, slug: str = Path(max_length=64)):
             states[eid] = {"entity_id": eid, "state": "unavailable", "attributes": {}}
 
     # Presentation overrides ride alongside the states rather than being merged
-    # into them, so the raw HA attributes the UI reads stay untouched.
+    # into them, so the raw HA attributes the UI reads stay untouched. The
+    # per-entity require_proximity flag comes through here too — the guest UI
+    # uses it to mark which controls will ask for a location, and it is
+    # false everywhere on a token with no gated entity.
     meta = await db.get_token_entity_meta(row["id"])
     return {"entities": entity_ids, "states": states, "entity_meta": meta}
 
@@ -656,6 +742,11 @@ async def guest_command(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Service '{svc_name}' not allowed for {entity_domain}",
         )
+
+    # Last of the authorization checks, and before the payload ones, so a
+    # malformed colour on a gated entity from off-site still answers "you need
+    # to be at the property" rather than confirming the payload was fine.
+    await _enforce_proximity(row, body)
 
     # The colour wheel is the one widget that posts a structured value built
     # from raw pointer coordinates, so its payload is validated rather than

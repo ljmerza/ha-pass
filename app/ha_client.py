@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse, urlunparse
@@ -252,6 +253,54 @@ async def camera_stream(entity_id: str) -> AsyncIterator[tuple[str, AsyncIterato
             "content-type", "multipart/x-mixed-replace; boundary=--frameboundary"
         )
         yield ctype, resp.aiter_raw()
+
+
+# ---------------------------------------------------------------------------
+# Home zone — read by the per-entity proximity gate
+# ---------------------------------------------------------------------------
+# zone.home moves about as often as the house does, so a short cache keeps a
+# gated tap off HA's REST API without making a relocation take a restart to
+# apply. Only successful reads are cached — while HA is unreachable every gated
+# command retries, which the proximity failure budget in the router bounds.
+HOME_ZONE_CACHE_TTL = 300
+
+_home_zone: dict[str, float] | None = None
+_home_zone_ts: float = 0.0
+
+
+async def get_home_zone() -> dict[str, float] | None:
+    """Return zone.home as {"latitude", "longitude", "radius"}, or None.
+
+    None means "cannot be verified": zone.home absent, missing or non-numeric
+    attributes, or HA unreachable. The proximity gate treats None as a refusal,
+    so nothing here may substitute a default — there is no safe guess for where
+    a house is.
+    """
+    global _home_zone, _home_zone_ts
+    now = time.monotonic()
+    if _home_zone is not None and (now - _home_zone_ts) < HOME_ZONE_CACHE_TTL:
+        return _home_zone
+
+    try:
+        resp = await _require_client().get("/api/states/zone.home")
+        resp.raise_for_status()
+        attrs = resp.json().get("attributes") or {}
+    except Exception:
+        logger.warning("Could not read zone.home for the proximity check")
+        return None
+
+    try:
+        zone = {
+            "latitude": float(attrs["latitude"]),
+            "longitude": float(attrs["longitude"]),
+            "radius": float(attrs["radius"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        logger.warning("zone.home has no usable latitude/longitude/radius")
+        return None
+
+    _home_zone, _home_zone_ts = zone, now
+    return zone
 
 
 async def validate_connectivity() -> None:

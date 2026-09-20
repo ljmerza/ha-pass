@@ -117,8 +117,9 @@ async def create_token(
         if entity_ids:
             meta = entity_meta or {}
             await db.executemany(
-                "INSERT INTO token_entities (token_id, entity_id, display_name, options) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO token_entities "
+                "(token_id, entity_id, display_name, options, require_proximity) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
                     (
                         token_id,
@@ -126,6 +127,7 @@ async def create_token(
                         (meta.get(eid) or {}).get("display_name"),
                         json.dumps((meta.get(eid) or {}).get("options"))
                         if (meta.get(eid) or {}).get("options") else None,
+                        int(bool((meta.get(eid) or {}).get("require_proximity"))),
                     )
                     for eid in entity_ids
                 ],
@@ -171,15 +173,20 @@ async def get_token_entities(token_id: str) -> list[str]:
 
 
 async def get_token_entity_meta(token_id: str) -> dict[str, dict[str, Any]]:
-    """entity_id -> {"display_name": str|None, "options": dict}.
+    """entity_id -> {"display_name": str|None, "options": dict, "require_proximity": bool}.
 
     Kept separate from get_token_entities() on purpose: that function returns the
     plain id list the allowlist checks depend on, and must not grow a shape the
     security path has to unpack.
+
+    require_proximity rides alongside `options` rather than inside it, matching
+    the storage: the blob is presentation, the column is an access control, and
+    the command path reads the column through get_proximity_entity_ids().
     """
     db = await get_db()
     async with db.execute(
-        "SELECT entity_id, display_name, options FROM token_entities WHERE token_id = ?",
+        "SELECT entity_id, display_name, options, require_proximity "
+        "FROM token_entities WHERE token_id = ?",
         (token_id,),
     ) as cur:
         rows = await cur.fetchall()
@@ -192,8 +199,29 @@ async def get_token_entity_meta(token_id: str) -> dict[str, dict[str, Any]]:
                 opts = json.loads(r["options"])
             except (ValueError, TypeError):
                 opts = {}
-        meta[r["entity_id"]] = {"display_name": r["display_name"], "options": opts}
+        meta[r["entity_id"]] = {
+            "display_name": r["display_name"],
+            "options": opts,
+            "require_proximity": bool(r["require_proximity"]),
+        }
     return meta
+
+
+async def get_proximity_entity_ids(token_id: str) -> set[str]:
+    """The entity IDs on this token a guest must be at the house to command.
+
+    A set, and only the gated IDs: the command path membership-tests one entity
+    against it and must not have to reason about the rest of a token's metadata
+    to decide whether a gate applies.
+    """
+    db = await get_db()
+    async with db.execute(
+        "SELECT entity_id FROM token_entities "
+        "WHERE token_id = ? AND require_proximity = 1",
+        (token_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return {r["entity_id"] for r in rows}
 
 
 async def set_entity_meta(
@@ -201,13 +229,23 @@ async def set_entity_meta(
     entity_id: str,
     display_name: str | None,
     options: dict[str, Any] | None,
+    require_proximity: bool = False,
 ) -> bool:
-    """Set one entity's display name and options. False if not on the token."""
+    """Set one entity's display name, options and proximity gate.
+
+    False if the entity is not on the token.
+    """
     db = await get_db()
     cur = await db.execute(
-        "UPDATE token_entities SET display_name = ?, options = ? "
+        "UPDATE token_entities SET display_name = ?, options = ?, require_proximity = ? "
         "WHERE token_id = ? AND entity_id = ?",
-        (display_name, json.dumps(options) if options else None, token_id, entity_id),
+        (
+            display_name,
+            json.dumps(options) if options else None,
+            int(bool(require_proximity)),
+            token_id,
+            entity_id,
+        ),
     )
     await db.commit()
     return cur.rowcount > 0
@@ -227,23 +265,29 @@ async def update_token_entities(
         # already stored would be silently dropped unless they are read back first
         # and re-applied. An explicit entity_meta argument wins over what is stored.
         async with db.execute(
-            "SELECT entity_id, display_name, options FROM token_entities WHERE token_id = ?",
+            "SELECT entity_id, display_name, options, require_proximity "
+            "FROM token_entities WHERE token_id = ?",
             (token_id,),
         ) as cur:
             existing = {
-                r["entity_id"]: (r["display_name"], r["options"])
+                r["entity_id"]: (r["display_name"], r["options"], r["require_proximity"])
                 for r in await cur.fetchall()
             }
         for eid, m in (entity_meta or {}).items():
             name = m.get("display_name")
             opts = m.get("options")
-            existing[eid] = (name, json.dumps(opts) if opts else None)
+            existing[eid] = (
+                name,
+                json.dumps(opts) if opts else None,
+                int(bool(m.get("require_proximity"))),
+            )
 
         await db.execute("DELETE FROM token_entities WHERE token_id = ?", (token_id,))
         await db.executemany(
-            "INSERT INTO token_entities (token_id, entity_id, display_name, options) "
-            "VALUES (?, ?, ?, ?)",
-            [(token_id, eid, *existing.get(eid, (None, None))) for eid in entity_ids],
+            "INSERT INTO token_entities "
+            "(token_id, entity_id, display_name, options, require_proximity) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(token_id, eid, *existing.get(eid, (None, None, 0))) for eid in entity_ids],
         )
         await db.execute("COMMIT")
     except Exception:

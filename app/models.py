@@ -127,24 +127,46 @@ class TokenUpdateEntitiesRequest(BaseModel):
 
 
 class EntityMetaRequest(BaseModel):
-    """Set one entity's presentation overrides.
+    """Set one entity's presentation overrides and its proximity gate.
 
     A blank display_name clears the override and falls back to the HA
     friendly_name. Unknown option keys are dropped, not rejected.
+
+    require_proximity is a sibling of `options`, not a member of it: it is an
+    access control the command path enforces, and `options` is the blob nothing
+    in that path reads.
     """
     entity_id: str = Field(..., min_length=1, max_length=255)
     display_name: str | None = Field(default=None, max_length=DISPLAY_NAME_MAX)
     options: dict[str, Any] | None = None
+    require_proximity: bool = False
 
 
 class TokenUpdateExpiryRequest(BaseModel):
     expires_in_seconds: int = Field(..., gt=0)
 
 
+class GuestLocation(BaseModel):
+    """Where the guest's browser says it is, for a proximity-gated command.
+
+    Coordinates only — there is no "I am at home" flag to send, because the
+    server does the comparison against zone.home itself and a client-asserted
+    answer would be worth nothing. `timestamp` is GeolocationPosition.timestamp
+    (milliseconds since the epoch) and is required: a fix with no time on it
+    cannot be checked for staleness, and one that cannot be checked is refused.
+    """
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    timestamp: int
+
+
 class CommandRequest(BaseModel):
     entity_id: str
     service: str  # e.g. "light.turn_on"
     data: dict[str, Any] = Field(default_factory=dict)
+    # Only sent for entities the token marks as proximity-gated. Absent on every
+    # other command, which is why it defaults to None rather than being required.
+    location: GuestLocation | None = None
 
 
 class TokenResponse(BaseModel):

@@ -219,8 +219,13 @@ requestAnimationFrame(updateThemeToggles);
 const SLUG = {{ slug | tojson }};
 const EXPIRES_AT = {{ expires_at | tojson }};
 const NEVER_EXPIRES = {{ never_expires }};
+// True only when this token has at least one proximity-gated entity. Rendered
+// by the server, and the same flag guards the location block further down — an
+// ordinary token's page carries no copy of that block, so it cannot prompt for
+// a position or so much as name the browser API that supplies one.
+const REQUIRES_LOCATION = {{ requires_location | tojson }};
 let states = {};
-// Per-token presentation overrides: { entity_id: {display_name, options} }
+// Per-token overrides: { entity_id: {display_name, options, require_proximity} }
 let entityMeta = {};
 let entityOrder = [];
 let sheetCallback = null;
@@ -405,6 +410,14 @@ function buildCard(eid, state) {
   else if (domain === 'input_select') controls = buildSelectControls(eid, state);
   else if (DATETIME_DOMAINS.includes(domain)) controls = buildPickerControls(eid, state);
 
+  // Marks a control that will ask for the guest's location when pressed, so the
+  // prompt is expected rather than a surprise. Empty string on every other card,
+  // which leaves those unchanged.
+  const locationBadge = requiresLocation(eid)
+    ? `<span role="img" aria-label="Needs you to be at the property" title="Needs you to be at the property"
+        class="material-symbols-outlined text-muted flex-shrink-0" style="font-size:15px">location_on</span>`
+    : '';
+
   const hasToggle = ['light', 'switch', 'input_boolean', 'group', 'fan'].includes(domain);
   const toggleHtml = hasToggle ? `<div class="toggle-track ${stateStr === 'on' ? 'on' : ''}"
     role="switch" aria-checked="${stateStr === 'on'}" tabindex="0"
@@ -424,7 +437,7 @@ function buildCard(eid, state) {
         <span aria-hidden="true" class="material-symbols-outlined ${color.text}" id="icon-${cssId(eid)}">${icon}</span>
       </div>
       <div class="flex-1 min-w-0">
-        <div class="text-sm font-semibold truncate">${esc(name)}</div>
+        <div class="text-sm font-semibold truncate${locationBadge ? ' flex items-center gap-1' : ''}">${esc(name)}${locationBadge}</div>
         <div class="text-xs text-muted" id="state-${cssId(eid)}">${formatState(domain, stateStr, state)}</div>
       </div>
       ${toggleHtml}
@@ -441,6 +454,14 @@ function displayName(eid, state) {
 
 function entityOption(eid, key) {
   return Boolean(entityMeta[eid]?.options?.[key]);
+}
+
+// Whether to ask the browser for a fix before sending this entity's command.
+// The server enforces the gate regardless of what this returns — it only
+// decides whether the guest is asked first, which is why the server-rendered
+// REQUIRES_LOCATION is the outer term.
+function requiresLocation(eid) {
+  return REQUIRES_LOCATION && Boolean(entityMeta[eid]?.require_proximity);
 }
 
 function formatState(domain, stateStr, state) {
@@ -1233,15 +1254,74 @@ function showToast(msg, type = 'error') {
   setTimeout(() => { el.classList.add('toast-out'); setTimeout(() => el.remove(), 200); }, 3000);
 }
 
+{% if requires_location %}
+// ── Location for proximity-gated controls ────────────────────────────
+// Emitted only for a token that actually has a gated entity — see
+// REQUIRES_LOCATION above. The fix is asked for when the guest presses the
+// gated control rather than on page load, so the browser's permission prompt
+// arrives with an obvious reason attached instead of ambushing someone who
+// only opened the link to turn a lamp on.
+//
+// The coordinates go to the server and the server decides; nothing here judges
+// whether the guest is home. A guest who edits this can send whatever they
+// like, which is exactly why the check is on the other end.
+const LOCATION_TIMEOUT_MS = 20000;
+
+function requestLocationFix() {
+  return new Promise(resolve => {
+    if (!navigator.geolocation) {
+      // Geolocation is a secure-context API — over a plain http:// link it is
+      // simply absent, which is much the likeliest way to land here.
+      showToast('This control needs your location, which needs a secure (https) link');
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        timestamp: pos.timestamp,
+      }),
+      err => {
+        showToast(err.code === err.PERMISSION_DENIED
+          ? 'Location permission is needed for this control'
+          : 'Could not get your location — try again');
+        resolve(null);
+      },
+      // maximumAge 0 so the device measures now instead of handing back a fix
+      // from wherever the guest last was: the server refuses stale ones, and
+      // being refused off the back of a silent cache hit is baffling.
+      { enableHighAccuracy: true, timeout: LOCATION_TIMEOUT_MS, maximumAge: 0 },
+    );
+  });
+}
+{% endif %}
+
 async function sendCmd(entityId, domain, service, extraData = {}) {
+  const body = { entity_id: entityId, service: `${domain}.${service}`, data: extraData };
+  const gated = requiresLocation(entityId);
+  if (gated) {
+    const fix = await requestLocationFix();
+    if (!fix) return;  // requestLocationFix has already said why
+    body.location = fix;
+  }
   try {
     const r = await fetch(`/g/${SLUG}/command`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ entity_id: entityId, service: `${domain}.${service}`, data: extraData }),
+      body: JSON.stringify(body),
     });
     if (r.status === 410) { showExpired(); return; }
     if (r.status === 401) { showPinEntry(); return; }
+    if (gated && !r.ok) {
+      // A gated control's refusal carries a reason worth repeating — "you need
+      // to be at the property", "your location is out of date". Every other
+      // path keeps the generic message so no endpoint's wording leaks into the
+      // guest UI.
+      const err = await r.json().catch(() => ({}));
+      showToast(err.detail || 'Command failed');
+      return;
+    }
     if (r.status === 429) { showToast('Too many requests — slow down'); return; }
     if (!r.ok) showToast('Command failed');
   } catch {

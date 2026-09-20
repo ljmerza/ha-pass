@@ -56,6 +56,12 @@ async def _fake_camera_stream(entity_id: str):
     yield "multipart/x-mixed-replace; boundary=--frameboundary", _chunks()
 
 
+# zone.home as the mocked HA reports it, for the per-entity proximity gate.
+# A 100 m radius around an arbitrary point — tests derive nearby/far coordinates
+# from it rather than hardcoding a second pair.
+HOME_ZONE = {"latitude": 40.0, "longitude": -75.0, "radius": 100.0}
+
+
 @pytest.fixture
 def mock_ha_client():
     """Patch the Home Assistant external dependency.
@@ -81,6 +87,7 @@ def mock_ha_client():
         "invalidate_entity_cache": AsyncMock(),
         "camera_snapshot": AsyncMock(return_value=(b"\xff\xd8fake-jpeg", "image/jpeg")),
         "camera_stream": _fake_camera_stream,
+        "get_home_zone": AsyncMock(return_value=dict(HOME_ZONE)),
     }
     with patch.multiple("app.ha_client", **mocks):
         yield mocks

@@ -223,6 +223,13 @@ def _clean_options(value: Any) -> dict[str, Any] | None:
 def _clean_entity_meta(
     meta: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]] | None:
+    """Normalise the per-entity override blob the dashboard posts.
+
+    require_proximity is read from the top level of each entry, never from
+    `options` — it is stored in its own column because the command path enforces
+    it, and letting it arrive inside the presentation blob would blur exactly
+    the line that column exists to keep.
+    """
     if not meta:
         return None
     cleaned = {}
@@ -231,8 +238,13 @@ def _clean_entity_meta(
             continue
         name = _clean_name(m.get("display_name"))
         opts = _clean_options(m.get("options"))
-        if name or opts:
-            cleaned[eid] = {"display_name": name, "options": opts}
+        gated = bool(m.get("require_proximity"))
+        if name or opts or gated:
+            cleaned[eid] = {
+                "display_name": name,
+                "options": opts,
+                "require_proximity": gated,
+            }
     return cleaned or None
 
 
@@ -249,7 +261,9 @@ async def set_entity_meta(
     name = _clean_name(body.display_name)
     opts = _clean_options(body.options)
 
-    updated = await db.set_entity_meta(token_id, body.entity_id, name, opts)
+    updated = await db.set_entity_meta(
+        token_id, body.entity_id, name, opts, body.require_proximity
+    )
     if not updated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -257,7 +271,12 @@ async def set_entity_meta(
         )
 
     await ha_client.invalidate_entity_cache(token_id)
-    return {"entity_id": body.entity_id, "display_name": name, "options": opts or {}}
+    return {
+        "entity_id": body.entity_id,
+        "display_name": name,
+        "options": opts or {},
+        "require_proximity": body.require_proximity,
+    }
 
 
 @router.get("/tokens/{token_id}")

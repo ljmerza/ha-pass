@@ -250,6 +250,15 @@
       <p class="text-[11px] text-muted mt-1.5 ml-6.5">Also off by default, and only drawn for lights Home Assistant reports as colour-capable.</p>
     </div>
 
+    <div id="entity-proximity" class="mt-4 pt-4 border-t border-border-light dark:border-border-dark">
+      <label class="flex items-center gap-2.5 cursor-pointer">
+        <input id="entity-require-proximity" type="checkbox" class="w-4 h-4 rounded border-border-light dark:border-border-dark accent-primary">
+        <span class="text-sm">Require the guest to be at the property</span>
+      </label>
+      <p class="text-[11px] text-muted mt-1.5 ml-6.5">Off by default. The guest's browser is asked for its location when they press this one control, and the command only goes through if that position falls inside Home Assistant's <span class="font-mono">zone.home</span>. Everything else on the link is unaffected.</p>
+      <p class="text-[11px] text-muted mt-1.5 ml-6.5">The guest link must be served over HTTPS — browsers withhold location on plain HTTP and the control will refuse. The position is self-reported by the browser, so treat this as a deterrent for a casual guest, not proof anyone is really there.</p>
+    </div>
+
     <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-border-light dark:border-border-dark">
       <button data-action="close-modal" data-modal="entity" class="px-4 py-2 text-sm font-display font-medium rounded-xl border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
       <button data-action="submit-entity-meta" class="px-4 py-2 text-sm font-display font-semibold rounded-xl bg-primary hover:bg-primary-hover text-white transition-colors">Apply</button>
@@ -703,6 +712,11 @@ async function loadEntities() {
   if (r.ok) allEntities = await r.json();
 }
 
+// Domains a guest can only look at. Nothing to gate on these: cameras and
+// sensors never reach the command handler the proximity check lives in, so the
+// toggle is hidden rather than offered and then quietly ignored.
+const PROXIMITY_EXEMPT_DOMAINS = ['sensor', 'binary_sensor', 'camera', 'schedule'];
+
 // ── Entity Picker Component ───────────────────────────────────────────
 // Derived from DOMAIN_ORDER so a domain added in domains.js gets a chip
 // automatically - camera was missing because this list was maintained by hand.
@@ -769,6 +783,7 @@ function renderPicker(containerId, pickerState) {
           const renamed = m.display_name;
           const showsBrightness = m.options && m.options.show_brightness;
           const showsColor = m.options && m.options.show_color;
+          const gated = m.require_proximity;
           return `<li class="flex items-center gap-3 px-3 py-2.5 border-b border-border-light dark:border-border-dark last:border-b-0 hover:bg-soot/[0.03] dark:hover:bg-white/5 cursor-pointer transition-colors" data-action="picker-edit" data-container="${containerId}" data-entity="${esc(e.entity_id)}" role="button" tabindex="0" aria-label="Edit ${esc(renamed || e.friendly_name || e.entity_id)}">
           <div class="w-7 h-7 rounded-full ${DOMAIN_COLORS[e.domain]?.icon || 'bg-gray-500'} flex items-center justify-center flex-shrink-0">
             <span aria-hidden="true" class="material-symbols-outlined text-white text-sm">${PICKER_ICONS[e.domain] || 'devices'}</span>
@@ -779,6 +794,7 @@ function renderPicker(containerId, pickerState) {
               ${renamed ? '<span aria-hidden="true" class="material-symbols-outlined text-accent" style="font-size:14px" title="Renamed">edit</span>' : ''}
               ${showsBrightness ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Brightness slider shown">brightness_high</span>' : ''}
               ${showsColor ? '<span aria-hidden="true" class="material-symbols-outlined text-muted" style="font-size:14px" title="Colour wheel shown">palette</span>' : ''}
+              ${gated ? '<span aria-hidden="true" class="material-symbols-outlined text-primary" style="font-size:14px" title="Guest must be at the property">location_on</span>' : ''}
             </div>
             <div class="text-[11px] text-muted font-mono truncate">${esc(e.entity_id)}</div>
           </div>
@@ -949,6 +965,11 @@ function openEntityModal(containerId, entityId) {
   document.getElementById('entity-show-color').checked =
     Boolean(meta.options && meta.options.show_color);
 
+  const gateable = !PROXIMITY_EXEMPT_DOMAINS.includes(entityId.split('.')[0]);
+  document.getElementById('entity-proximity').classList.toggle('hidden', !gateable);
+  document.getElementById('entity-require-proximity').checked =
+    gateable && Boolean(meta.require_proximity);
+
   openModal('entity-modal');
   nameInput.focus();
 }
@@ -972,10 +993,16 @@ function submitEntityMeta() {
   if (showBrightness) options.show_brightness = true;
   if (showColor) options.show_color = true;
 
-  if (name || Object.keys(options).length) {
+  // Sibling of options, not a member of it: the server stores it in its own
+  // column because the command path enforces it, and options is presentation.
+  const gateable = !PROXIMITY_EXEMPT_DOMAINS.includes(entityId.split('.')[0]);
+  const requireProximity = gateable && document.getElementById('entity-require-proximity').checked;
+
+  if (name || Object.keys(options).length || requireProximity) {
     pickerState.meta[entityId] = {
       display_name: name || null,
       options: Object.keys(options).length ? options : null,
+      require_proximity: requireProximity,
     };
   } else {
     delete pickerState.meta[entityId];
