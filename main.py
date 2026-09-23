@@ -26,6 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CLEANUP_INTERVAL_SECONDS = 300
+HA_STARTUP_ATTEMPTS = 60
+HA_STARTUP_RETRY_SECONDS = 5
 
 
 @asynccontextmanager
@@ -42,11 +44,20 @@ async def lifespan(app: FastAPI):
 
     ha_client.init_client()  # sync — no await
 
-    try:
-        await ha_client.validate_connectivity()
-    except Exception as exc:
-        logger.error("Cannot reach Home Assistant: %s", exc)
-        raise RuntimeError("Home Assistant unreachable at startup") from exc
+    # HA may still be booting (e.g. after a host reboot) — retry before giving up.
+    for attempt in range(1, HA_STARTUP_ATTEMPTS + 1):
+        try:
+            await ha_client.validate_connectivity()
+            break
+        except Exception as exc:
+            if attempt == HA_STARTUP_ATTEMPTS:
+                logger.error("Cannot reach Home Assistant: %s", exc)
+                raise RuntimeError("Home Assistant unreachable at startup") from exc
+            logger.warning(
+                "Home Assistant not reachable (attempt %d/%d): %s — retrying in %ds",
+                attempt, HA_STARTUP_ATTEMPTS, exc, HA_STARTUP_RETRY_SECONDS,
+            )
+            await asyncio.sleep(HA_STARTUP_RETRY_SECONDS)
 
     await ha_client.start_ws_listener()
 
