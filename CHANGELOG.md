@@ -9,6 +9,22 @@ HomePass is a fork of [Rohithkadaveru/ha-pass](https://github.com/Rohithkadaveru
 unmaintained upstream since April 2026. Releases up to and including 0.2.4 are
 upstream's; 0.3.0 is the first release from this fork.
 
+## [1.0.2] - 2026-09-22
+
+### Fixed
+
+- **Guest icons rendered as plain words once the service worker was active.**
+  The worker is served with the app's CSP, and a worker's `fetch()` is governed
+  by `connect-src`, which was `'self'` only. Its cache-first handler for
+  `fonts.googleapis.com` / `fonts.gstatic.com` was refused, so Material Symbols
+  never loaded. Both hosts are now allowed in `connect-src`.
+- **Local builds shipped a byte-identical service worker.** Without a `GIT_SHA`
+  build arg, `sw.js` was always stamped `homepass-dev`, so browsers never
+  installed an updated worker. The cache version now includes a build timestamp.
+- **HomePass stayed down if Home Assistant wasn't up yet at startup.** A single
+  failed connectivity check aborted startup, which is common after a host
+  reboot. The check now retries every 5 seconds for up to 5 minutes.
+
 ## [1.0.1] - 2026-09-20
 
 ### Fixed
@@ -225,6 +241,7 @@ needed.
 - Guest PWA with live state over SSE.
 - Service allowlist, per-token rate limiting and IP allowlisting.
 
+[1.0.2]: https://github.com/ljmerza/homepass/compare/v1.0.1...v1.0.2
 [1.0.0]: https://github.com/ljmerza/homepass/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/ljmerza/homepass/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/ljmerza/homepass/compare/v0.2.3...v0.2.4
