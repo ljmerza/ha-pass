@@ -1,5 +1,5 @@
 name: HomePass
-version: "1.0.1"
+version: "1.0.2"
 slug: homepass
 description: Shareable guest links for controlling Home Assistant devices
 url: "https://github.com/ljmerza/homepass"
