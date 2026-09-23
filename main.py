@@ -125,7 +125,9 @@ async def security_headers(request: Request, call_next):
         f"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         f"font-src https://fonts.gstatic.com; "
         f"img-src 'self' data:; "
-        f"connect-src 'self'; "
+        # Fonts hosts: the service worker fetch()es them, and a worker's
+        # fetch() is governed by connect-src, not style-src/font-src.
+        f"connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; "
         f"{frame_ancestors}"
     )
     response.headers["Content-Security-Policy"] = csp

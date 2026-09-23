@@ -20,7 +20,9 @@ RUN mkdir -p static/icons && python generate_icons.py
 RUN tailwindcss -i static/input.css -o static/dist.css --minify
 
 ARG GIT_SHA=dev
-RUN sed -i "s/CACHE_VERSION_PLACEHOLDER/homepass-${GIT_SHA}/" static/sw.js
+# Build timestamp too: local builds all get GIT_SHA=dev, and a byte-identical
+# sw.js means browsers never install the new worker.
+RUN sed -i "s/CACHE_VERSION_PLACEHOLDER/homepass-${GIT_SHA}-$(date +%s)/" static/sw.js
 
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM python:3.12-slim
